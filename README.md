@@ -42,7 +42,10 @@ Pipeline per frame, in [js/vision.js](js/vision.js):
    the accent color over a desaturated base; display normalization uses a
    decaying running max so it doesn't flicker.
 
-Modes: **Enhance** (CLAHE grayscale), **Veins** (teal dark-ridge overlay),
+Modes: **Reveal** (default; computational photography: motion-adaptive
+temporal frame stacking + soft-clipped unsharp amplification of the stacked
+RGB at vein scales, composited as a hard-light detail layer over crisp
+native-res video, skin-gated), **Veins** (teal dark-ridge overlay),
 **Labels** (adds numbered tags via connected-component analysis of the
 thresholded map — hysteresis flood fill, elongated components only, throttled
 to every 12th frame live so tags don't jitter), **Structures** (adds the

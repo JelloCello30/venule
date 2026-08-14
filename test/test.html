@@ -74,13 +74,14 @@
       ctx.fillRect(0, 0, W, H);
     }
     strokeVeins(ctx, 'veins');
-    var img = ctx.getImageData(0, 0, W, H);        // per-pixel sensor noise
-    for (var j = 0; j < img.data.length; j += 4) {
+    var img = ctx.getImageData(0, 0, W, H);
+    var pristine = new Uint8ClampedArray(img.data); // noise-free copy for the stacking test
+    for (var j = 0; j < img.data.length; j += 4) {  // per-pixel sensor noise
       var n = (rnd() - 0.5) * 12;
       img.data[j] += n; img.data[j + 1] += n; img.data[j + 2] += n;
     }
     ctx.putImageData(img, 0, 0);
-    return img;
+    return { img: img, pristine: pristine };
   }
 
   function buildMask(style) {
@@ -107,7 +108,8 @@
     ctx.putImageData(img, 0, 0);
   }
 
-  var input = buildInput();
+  var built = buildInput();
+  var input = built.img, pristine = built.pristine;
   var truth = buildMask('truth');
   var exclude = buildMask('exclude');
 
@@ -144,6 +146,51 @@
   var stateB = V.makeState();
   V.analyze(input.data, bufs, stateB, { mode: 'structures', strength: 0.6, sensitivity: 0.55, still: true });
   var brightOk = bufs.vessB.some(function (v) { return v > 0; });
+
+  // reveal: in-place amplification must lift veins well above the floor
+  var rev = new ImageData(W, H);
+  var stateR = V.makeState();
+  V.analyzeReveal(input.data, rev.data, bufs, stateR, { strength: 0.6, still: true });
+  var rOn = 0, rOnN = 0, rOff = 0, rOffN = 0;
+  for (var ri = 0; ri < W * H; ri++) {
+    var rx = ri % W, ry = (ri / W) | 0;
+    if (rx < 8 || ry < 8 || rx >= W - 8 || ry >= H - 8) continue;
+    var dg = rev.data[ri * 4 + 1] - 128;
+    if (dg < 0) dg = -dg;
+    if (truth[ri]) { rOn += dg; rOnN++; }
+    else if (!exclude[ri]) { rOff += dg; rOffN++; }
+  }
+  var revOn = rOn / rOnN, revOff = rOff / rOffN;
+  var revealRatio = revOn / Math.max(revOff, 1e-9);
+
+  // stacking: 25 fresh-noise frames of the same scene must beat one frame
+  function noisyFrame() {
+    var f = new Uint8ClampedArray(pristine);
+    for (var q = 0; q < f.length; q += 4) {
+      var nz = (rnd() - 0.5) * 12;
+      f[q] += nz; f[q + 1] += nz; f[q + 2] += nz;
+    }
+    return f;
+  }
+  function offNoise(revData) {
+    var s = 0, n2 = 0;
+    for (var q = 0; q < W * H; q++) {
+      var qx = q % W, qy = (q / W) | 0;
+      if (qx < 8 || qy < 8 || qx >= W - 8 || qy >= H - 8) continue;
+      if (truth[q] || exclude[q]) continue;
+      var d = revData[q * 4 + 1] - 128;
+      s += d < 0 ? -d : d; n2++;
+    }
+    return s / n2;
+  }
+  var stateS = V.makeState();
+  V.analyzeReveal(noisyFrame(), rev.data, bufs, stateS, { strength: 0.6, still: false });
+  var singleNoise = offNoise(rev.data);
+  for (var sf = 0; sf < 25; sf++) {
+    V.analyzeReveal(noisyFrame(), rev.data, bufs, stateS, { strength: 0.6, still: false });
+  }
+  var stackedNoise = offNoise(rev.data);
+  var stackDrop = stackedNoise / Math.max(singleNoise, 1e-9);
 
   // pulse mode: left half of a synthetic clip oscillates at 1.2 Hz (72 bpm)
   // under noise; the energy map must localize it and the BPM must be right
@@ -198,10 +245,14 @@
   });
   var precision = comps.length ? hits / comps.length : 0;
 
+  var revealOk = revealRatio >= 1.8 && revOn >= 8 && stackDrop <= 0.75;
   var pass = ratio >= 2.5 && onMean >= 0.10 && eqDrop >= 8 && skinFrac >= 0.5 &&
-    comps.length >= 2 && comps.length <= 9 && precision >= 0.6 && brightOk && pulseOk;
+    comps.length >= 2 && comps.length <= 9 && precision >= 0.6 && brightOk && pulseOk && revealOk;
   var lines = [
     'skin mask coverage      : ' + (skinFrac * 100).toFixed(0) + '%      (need ≥ 50%)',
+    'reveal on-vein amp      : ' + revOn.toFixed(1) + '       (need ≥ 8)',
+    'reveal on/off ratio     : ' + revealRatio.toFixed(2) + '     (need ≥ 1.8)',
+    'stacking noise drop     : ' + (stackDrop * 100).toFixed(0) + '% of single frame (need ≤ 75%)',
     'vesselness on-vein mean : ' + onMean.toFixed(4) + '   (need ≥ 0.10)',
     'vesselness off-vein mean: ' + offMean.toFixed(4),
     'on/off ratio            : ' + ratio.toFixed(2) + '     (need ≥ 2.5)',

@@ -6,7 +6,7 @@
 <title>venule — see the veins your camera almost sees</title>
 <meta name="description" content="venule turns a plain camera into a vein-contrast instrument. It amplifies the faint hemoglobin signal already in the image — live, in your browser, nothing uploaded.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230c0e10'/%3E%3Cpath d='M16 26V15M16 15c0-5-4-6-6-9M16 15c0-4 4-5 6-8' stroke='%2346e0b4' stroke-width='2.4' stroke-linecap='round' fill='none'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="css/venule.css?v=3">
+<link rel="stylesheet" href="css/venule.css?v=4">
 </head>
 <body class="landing">
 
@@ -42,7 +42,7 @@
   <div class="wrap">
     <p class="eyebrow">The method</p>
     <h2>Why this works</h2>
-    <p class="intro">No machine learning, no cloud — three well-studied image-processing steps, run 30 times a second on your own hardware.</p>
+    <p class="intro">No cloud — one small neural net (for knowing what’s skin) plus classical computational photography, all running on your own hardware, 30 times a second.</p>
     <div class="cols3">
       <div>
         <span class="step-n">01</span>
@@ -62,8 +62,8 @@
       </div>
       <div>
         <span class="step-n">02</span>
-        <h3>Local equalization turns it up</h3>
-        <p>CLAHE — contrast-limited adaptive histogram equalization — restretches the tones of each small neighborhood independently, so a 3% dip becomes a visible line without blowing out the rest of the frame.</p>
+        <h3>Stack frames, then turn it up</h3>
+        <p>Hold still and venule averages your video like a phone’s night mode — noise falls with the square root of the frame count. Then <em>Reveal</em>, the default view, amplifies each pixel’s deviation from its neighborhood several-fold, only on skin. Your arm, with its vein pattern turned up — not a cartoon drawn over it.</p>
       </div>
       <div>
         <span class="step-n">03</span>
@@ -81,6 +81,7 @@
     <p class="intro">venule amplifies signal that reaches the sensor. It cannot create signal that physics keeps out of the image. Both halves of that sentence matter.</p>
     <div class="twocol">
       <ul>
+        <li><span class="mark-yes">DOES</span><strong>Amplify what’s really there</strong><span><em>Reveal</em> — the default — stacks frames to cancel sensor noise, then boosts vein-band contrast in place. What you see is your own skin with the signal turned up, denoised the way night mode denoises the dark.</span></li>
         <li><span class="mark-yes">DOES</span><strong>Near-surface veins, live</strong><span>Back of the hand, inner wrist, forearm — the classic visible network, made obvious.</span></li>
         <li><span class="mark-yes">DOES</span><strong>Run entirely on your device</strong><span>A static page and ~1,000 lines of JavaScript. There is no server to upload to.</span></li>
         <li><span class="mark-yes">DOES</span><strong>Label what it finds</strong><span><em>Labels</em> mode tags each detected vessel-like structure; <em>Structures</em> mode adds an amber overlay for raised, tendon-like ridges. The names are honest: “vein-like,” not “verified vein.”</span></li>

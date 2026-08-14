@@ -97,7 +97,7 @@
 
   var app = {
     phase: 'start',          // start | live | photo | error
-    mode: 'veins',           // enhance | veins | split
+    mode: 'reveal',          // reveal | veins | labels | structures | pulse | split
     facing: 'environment',
     stream: null,
     frozen: false,
@@ -125,6 +125,9 @@
     stillCtx: null,
     segTick: 0,
     stillSegDone: false,
+    motion: 0,
+    blackTick: 0,
+    blackCount: 0,
     debug: /[?&]debug=1/.test(location.search),
     frameMs: [],
     frameCount: 0,
@@ -219,8 +222,7 @@
   }
 
   function syncProcSize() {
-    // Enhance is cheap (no vesselness), so it earns a fixed higher width
-    var w = app.mode === 'enhance' ? 640 : PROC_WIDTHS[app.procIdx];
+    var w = PROC_WIDTHS[app.procIdx];
     var h = Math.round(w / sourceAspect() / 2) * 2;
     setProcSize(w, h);
   }
@@ -331,9 +333,7 @@
   }
 
   function pipelineModeFor(mode) {
-    if (mode === 'enhance' || mode === 'pulse') return 'enhance';
-    if (mode === 'structures') return 'structures';
-    return 'veins'; // veins, labels, split
+    return mode === 'structures' ? 'structures' : 'veins'; // veins, labels
   }
 
   function renderPulseOverlay() {
@@ -371,57 +371,77 @@
 
     var still = app.phase === 'photo' || app.frozen;
     // refresh the neural mask: every other live frame, once per still
-    if (app.mode !== 'enhance') {
-      if (!still) {
-        if (app.segTick++ % 2 === 0) updateSegMask();
-      } else if (!app.stillSegDone && seg.inst) {
-        app.stillSegDone = true;
-        updateSegMask();
+    if (!still) {
+      if (app.segTick++ % 2 === 0) updateSegMask();
+    } else if (!app.stillSegDone && seg.inst) {
+      app.stillSegDone = true;
+      updateSegMask();
+    }
+
+    // black-frame watchdog: a live feed that renders but delivers no light
+    // is otherwise indistinguishable from "app is broken"
+    if (app.phase === 'live' && ++app.blackTick % 60 === 0) {
+      var lum = 0, npx = 0;
+      for (var bi = 1; bi < img.data.length; bi += 163 * 4 + 1) { lum += img.data[bi]; npx++; }
+      if (lum / npx < 4) {
+        if (++app.blackCount >= 2) showToast('camera is delivering black frames — reload the page, or try another browser');
+      } else {
+        app.blackCount = 0;
       }
     }
 
-    // component labeling jitters if refreshed every frame; throttle it live
-    var wantLabels = app.mode === 'labels' && (still || app.labelTick++ % 12 === 0);
-    var res = V.analyze(img.data, app.bufs, app.state, {
-      mode: pipelineModeFor(app.mode),
-      strength: parseFloat(els.strength.value),
-      sensitivity: parseFloat(els.sensitivity.value),
-      still: still,
-      labels: wantLabels,
-      catMask: seg.mask,
-      catW: seg.maskW,
-      catH: seg.maskH
-    });
-    if (wantLabels) app.lastLabels = res.labels;
-    app.skinFrac = res.skinFrac;
-
-    if (app.mode === 'enhance') {
-      V.renderEnhance(app.bufs, app.outImage.data);
+    if (app.mode === 'reveal' || app.mode === 'split') {
+      // computational-photography path: temporal stack + in-place
+      // amplification, composited as a hard-light detail layer over the
+      // crisp base (128 = neutral, so non-skin is untouched)
+      var resR = V.analyzeReveal(img.data, app.outImage.data, app.bufs, app.state, {
+        strength: parseFloat(els.strength.value),
+        still: still,
+        catMask: seg.mask,
+        catW: seg.maskW,
+        catH: seg.maskH
+      });
+      app.skinFrac = resR.skinFrac;
+      app.motion = resR.motion;
       app.outCtx.putImageData(app.outImage, 0, 0);
-      ctx.imageSmoothingEnabled = true;
-      ctx.drawImage(app.outCanvas, 0, 0, dw, dh);
-    } else {
-      // crisp base at display resolution, detection drawn on top
       ctx.drawImage(src, 0, 0, dw, dh);
-      V.renderOverlay(app.bufs, app.outImage.data, app.mode === 'structures');
-      app.outCtx.putImageData(app.outImage, 0, 0);
       ctx.imageSmoothingEnabled = true;
+      ctx.globalCompositeOperation = 'hard-light';
       if (app.mode === 'split') {
-        // raw left of the divider; gently dimmed base + overlay right
         var cut = Math.round(dw * app.split);
         ctx.save();
         ctx.beginPath();
         ctx.rect(cut, 0, dw - cut, dh);
         ctx.clip();
-        ctx.fillStyle = 'rgba(6,8,10,0.16)';
-        ctx.fillRect(cut, 0, dw - cut, dh);
         ctx.drawImage(app.outCanvas, 0, 0, dw, dh);
         ctx.restore();
       } else {
-        ctx.fillStyle = 'rgba(6,8,10,0.16)';
-        ctx.fillRect(0, 0, dw, dh);
         ctx.drawImage(app.outCanvas, 0, 0, dw, dh);
       }
+      ctx.globalCompositeOperation = 'source-over';
+    } else {
+      // annotation path: veins / labels / structures
+      var wantLabels = app.mode === 'labels' && (still || app.labelTick++ % 12 === 0);
+      var res = V.analyze(img.data, app.bufs, app.state, {
+        mode: pipelineModeFor(app.mode),
+        strength: parseFloat(els.strength.value),
+        sensitivity: parseFloat(els.sensitivity.value),
+        still: still,
+        labels: wantLabels,
+        catMask: seg.mask,
+        catW: seg.maskW,
+        catH: seg.maskH
+      });
+      if (wantLabels) app.lastLabels = res.labels;
+      app.skinFrac = res.skinFrac;
+
+      ctx.drawImage(src, 0, 0, dw, dh);
+      V.renderOverlay(app.bufs, app.outImage.data, app.mode === 'structures');
+      app.outCtx.putImageData(app.outImage, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.fillStyle = 'rgba(6,8,10,0.16)';
+      ctx.fillRect(0, 0, dw, dh);
+      ctx.drawImage(app.outCanvas, 0, 0, dw, dh);
     }
     els.divider.hidden = app.mode !== 'split';
     drawLabels();
@@ -488,9 +508,12 @@
   function updateReadout() {
     if (!app.bufs) return; // nothing sized yet (fresh page, pre-camera)
     var txt = app.bufs.w + 'px · ' + app.fps + ' fps' + (app.frozen ? ' · frozen' : '');
-    if (app.mode !== 'enhance' && app.mode !== 'pulse' && app.skinFrac < 0.05 &&
+    if (app.mode !== 'pulse' && app.skinFrac < 0.05 &&
         (app.phase === 'live' || app.phase === 'photo')) {
       txt += ' · point at skin';
+    }
+    if (app.mode === 'reveal' && app.phase === 'live' && !app.frozen && app.motion > 6) {
+      txt += ' · hold still to stack';
     }
     if (app.debug) {
       txt += ' · ' + (seg.status === 'ready' ? 'ai-mask' : 'color-mask (' + seg.status + ')') +
@@ -526,9 +549,9 @@
     if (live) syncProcSize(); // catches late videoWidth changes
 
     var ms = renderFrame();
-    // enhance/pulse are cheap and don't use the adaptive tier — measuring
-    // them would ratchet procIdx up and stall veins mode on return
-    if (live && app.mode !== 'enhance' && app.mode !== 'pulse') adaptResolution(ms);
+    // pulse is cheap and doesn't use the adaptive tier — measuring it
+    // would ratchet procIdx up and stall the other modes on return
+    if (live && app.mode !== 'pulse') adaptResolution(ms);
 
     app.frameCount++;
     if (t - app.lastT > 500) {
@@ -582,7 +605,7 @@
       // pulse needs a live feed: a still has no heartbeat to band-pass
       if (b.dataset.mode === 'pulse') b.disabled = app.phase === 'photo';
     });
-    els.sensRow.hidden = app.mode === 'enhance';
+    els.sensRow.hidden = app.mode === 'reveal' || app.mode === 'split';
     els.legend.hidden = app.mode !== 'structures';
     els.divider.hidden = app.mode !== 'split';
   }
@@ -590,7 +613,7 @@
   function setMode(m) {
     if (m === 'pulse' && app.phase === 'photo') return;
     app.mode = m;
-    if (app.bufs) syncProcSize(); // enhance runs at its own processing width
+    if (app.state) app.state.stacked = false; // fresh stack, no stale ghosts
     app.needsRender = true;
     updateModeUI();
     updateReadout();
@@ -673,7 +696,7 @@
   /* keyboard */
   document.addEventListener('keydown', function (e) {
     if (e.target.tagName === 'INPUT') return;
-    if (e.key === '1') setMode('enhance');
+    if (e.key === '1') setMode('reveal');
     if (e.key === '2') setMode('veins');
     if (e.key === '3') setMode('labels');
     if (e.key === '4') setMode('structures');
@@ -688,11 +711,15 @@
     else startLoop();
   });
 
+  function showToast(msg) {
+    var t = document.getElementById('errtoast');
+    if (t) { t.textContent = msg; t.hidden = false; }
+  }
+
   // surface hard failures on screen — a silent white/black page is
   // undebuggable from a phone
   window.addEventListener('error', function (e) {
-    var t = document.getElementById('errtoast');
-    if (t) { t.textContent = 'error: ' + (e.message || 'unknown'); t.hidden = false; }
+    showToast('error: ' + (e.message || 'unknown'));
   });
 
   initSegmenter();

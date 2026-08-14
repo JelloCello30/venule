@@ -35,12 +35,16 @@
       pix: new Int32Array(n),         // pixels of the component being traced
       mask: new Float32Array(n),      // soft skin mask, 0..1
       normHist: new Uint32Array(256), // percentile-normalization scratch
+      avgR: new Float32Array(n),      // temporal frame stack (noise ↓ √N)
+      avgG: new Float32Array(n),
+      avgB: new Float32Array(n),
+      mean: new Float32Array(n),      // local-mean scratch for Reveal
       hist: null, lut: null           // sized lazily by clahe()
     };
   };
 
   V.makeState = function () {
-    return { norm: 0, normB: 0 };
+    return { norm: 0, normB: 0, stacked: false, motion: 0 };
   };
 
   /* ---------------- channel extraction + denoise ---------------- */
@@ -528,6 +532,104 @@
     comps.sort(function (a, b) { return b.area - a.area; });
     return comps.slice(0, 9);
   }
+
+  /* ---------------- Reveal: stack + amplify ---------------- */
+
+  // O(n) box blur via running sums (radius-independent cost)
+  function boxBlurRunning(src, dst, tmp, w, h, r) {
+    var x, y, i, acc;
+    var normH = 1 / (2 * r + 1);
+    for (y = 0; y < h; y++) {
+      var row = y * w;
+      acc = src[row] * (r + 1);
+      for (x = 1; x <= r; x++) acc += src[row + (x < w ? x : w - 1)];
+      for (x = 0; x < w; x++) {
+        var add = x + r + 1; if (add >= w) add = w - 1;
+        var sub = x - r; if (sub < 0) sub = 0;
+        tmp[row + x] = acc * normH;
+        acc += src[row + add] - src[row + sub];
+      }
+    }
+    for (x = 0; x < w; x++) {
+      acc = tmp[x] * (r + 1);
+      for (y = 1; y <= r; y++) acc += tmp[(y < h ? y : h - 1) * w + x];
+      for (y = 0; y < h; y++) {
+        var addY = y + r + 1; if (addY >= h) addY = h - 1;
+        var subY = y - r; if (subY < 0) subY = 0;
+        dst[y * w + x] = acc * normH;
+        acc += tmp[addY * w + x] - tmp[subY * w + x];
+      }
+    }
+  }
+
+  // Temporal stacking: motion-adaptive EMA of the RGB frame. Holding still
+  // for ~a second averages ~10-20 frames, so the vein-band amplification
+  // boosts signal instead of sensor grain.
+  function updateStack(rgba, bufs, state, still) {
+    var n = bufs.w * bufs.h;
+    var aR = bufs.avgR, aG = bufs.avgG, aB = bufs.avgB;
+    var i, j;
+    if (still || !state.stacked) {
+      for (i = 0, j = 0; i < n; i++, j += 4) {
+        aR[i] = rgba[j]; aG[i] = rgba[j + 1]; aB[i] = rgba[j + 2];
+      }
+      state.stacked = true;
+      state.motion = 0;
+      return;
+    }
+    // estimate motion on a sparse grid before committing the blend rate
+    var diff = 0, cnt = 0;
+    for (i = 0; i < n; i += 7) {
+      var d = rgba[i * 4 + 1] - aG[i];
+      diff += d < 0 ? -d : d;
+      cnt++;
+    }
+    var motion = diff / cnt;
+    state.motion = motion;
+    var alpha = motion > 14 ? 0.65 : motion > 6 ? 0.3 : 0.09;
+    for (i = 0, j = 0; i < n; i++, j += 4) {
+      aR[i] += alpha * (rgba[j] - aR[i]);
+      aG[i] += alpha * (rgba[j + 1] - aG[i]);
+      aB[i] += alpha * (rgba[j + 2] - aB[i]);
+    }
+  }
+
+  // Reveal writes a hard-light detail layer: 128 = neutral (no change to
+  // the crisp base video), above/below = amplified local color deviation.
+  // Veins pop as themselves — darker, greener — rather than as painted
+  // annotations, and the layer upscales cleanly over native-res video.
+  V.analyzeReveal = function (rgba, outRGBA, bufs, state, params) {
+    var w = bufs.w, h = bufs.h, n = w * h;
+
+    extractGreenDenoised(rgba, bufs); // g8 feeds the luminance gate
+    updateStack(rgba, bufs, state, params.still);
+    var skinFrac = buildSkinMask(rgba, bufs, params.catMask, params.catW || 0, params.catH || 0);
+    luminanceGate(bufs, 0.40, 0.65);
+
+    var cov = (skinFrac - 0.03) / 0.05;
+    if (cov < 0) cov = 0; else if (cov > 1) cov = 1;
+    var gain = (1.5 + params.strength * 5) * cov;
+    var r = Math.max(4, Math.round(10 * w / 384));
+    var mask = bufs.mask, mean = bufs.mean;
+
+    var chans = [bufs.avgR, bufs.avgG, bufs.avgB];
+    for (var c = 0; c < 3; c++) {
+      var src = chans[c];
+      // fine 3x3 smoothing kills 1px micro-texture and residual grain so
+      // vein-scale (3-10px) structure dominates the amplified detail
+      box3f(src, bufs.f0, bufs.f1, w, h);
+      boxBlurRunning(src, mean, bufs.f1, w, h, r);
+      for (var i = 0, j = c; i < n; i++, j += 4) {
+        var d = (bufs.f0[i] - mean[i]) * gain * mask[i];
+        // soft knee (~±50) instead of a hard clamp: keeps midtone boost,
+        // prevents the clipped "metallic etching" look
+        d = d / (1 + (d < 0 ? -d : d) * 0.02);
+        outRGBA[j] = 128 + d;
+      }
+    }
+    for (var k = 3; k < n * 4; k += 4) outRGBA[k] = 255;
+    return { skinFrac: skinFrac, motion: state.motion };
+  };
 
   /* ---------------- rendering ---------------- */
 

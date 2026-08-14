@@ -122,7 +122,22 @@ try {
     V.renderEnhance(bufs, im3.data);
     cE.getContext('2d').putImageData(im3, 0, 0);
 
-    // composite panel (what the app shows)
+    // reveal panel (the app's default view): base + hard-light detail layer
+    var cR = panel(row, 'reveal (default mode)', W, H);
+    var xr = cR.getContext('2d');
+    xr.drawImage(img, 0, 0, W, H);
+    var stateR = V.makeState();
+    var revImg = xr.createImageData(W, H);
+    V.analyzeReveal(data.data, revImg.data, bufs, stateR,
+      { strength: 0.6, still: true, catMask: cat && cat.data, catW: cat ? cat.w : 0, catH: cat ? cat.h : 0 });
+    var revC = document.createElement('canvas');
+    revC.width = W; revC.height = H;
+    revC.getContext('2d').putImageData(revImg, 0, 0);
+    xr.globalCompositeOperation = 'hard-light';
+    xr.drawImage(revC, 0, 0);
+    xr.globalCompositeOperation = 'source-over';
+
+    // composite panel (the annotation view)
     var cO = panel(row, 'veins overlay', W, H);
     var xo = cO.getContext('2d');
     xo.drawImage(img, 0, 0, W, H);
