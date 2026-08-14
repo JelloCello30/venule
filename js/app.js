@@ -45,7 +45,10 @@
     state: V.makeState(),
     procCanvas: document.createElement('canvas'),
     procCtx: null,
+    outCanvas: document.createElement('canvas'),
+    outCtx: null,
     outImage: null,
+    skinFrac: 1,
     photoBitmap: null,
     split: 0.5,
     lastLabels: null,
@@ -68,6 +71,7 @@
     rafId: 0
   };
   app.procCtx = app.procCanvas.getContext('2d', { willReadFrequently: true });
+  app.outCtx = app.outCanvas.getContext('2d');
   app.pulseCtx = app.pulseCanvas.getContext('2d', { willReadFrequently: true });
   app.heatCtx = app.heatCanvas.getContext('2d');
   app.stillCtx = app.stillCanvas.getContext('2d');
@@ -93,8 +97,8 @@
     if (app.bufs && app.bufs.w === w && app.bufs.h === h) return;
     app.procCanvas.width = w;
     app.procCanvas.height = h;
-    els.canvas.width = w;
-    els.canvas.height = h;
+    app.outCanvas.width = w;
+    app.outCanvas.height = h;
     app.bufs = V.makeBuffers(w, h);
     app.state = V.makeState();
     app.outImage = new ImageData(w, h);
@@ -102,14 +106,30 @@
     // would draw offset until the recompute throttle ticks over
     app.lastLabels = null;
     app.labelTick = 0;
-    layoutView();
   }
 
-  // Display size is decoupled from buffer size: the canvas fills the
-  // viewport (contain-fit) and only sharpness changes when the adaptive
-  // resolution steps — otherwise the image visibly jumps on every step.
+  // The display canvas holds the source at (capped) native resolution —
+  // detection runs at the smaller processing size and is drawn on top, so
+  // the picture stays crisp no matter what the adaptive resolution does.
+  function syncDisplaySize() {
+    var sw, sh, isPhoto = app.phase === 'photo' && app.photoBitmap;
+    if (isPhoto) { sw = app.photoBitmap.width; sh = app.photoBitmap.height; }
+    else if (frozenSource()) { sw = app.stillCanvas.width; sh = app.stillCanvas.height; }
+    else if (els.video.videoWidth) { sw = els.video.videoWidth; sh = els.video.videoHeight; }
+    else return;
+    var cap = isPhoto ? 1600 : 1280;
+    var sc = Math.min(1, cap / sw);
+    var W = Math.round(sw * sc / 2) * 2, H = Math.round(sh * sc / 2) * 2;
+    if (els.canvas.width !== W || els.canvas.height !== H) {
+      els.canvas.width = W;
+      els.canvas.height = H;
+      layoutView();
+    }
+  }
+
+  // Contain-fit the display canvas into the viewport.
   function layoutView() {
-    if (!app.bufs) return;
+    if (!els.canvas.width) return;
     var vw = window.innerWidth, vh = window.innerHeight;
     if (!vw || !vh) {
       // hidden/zero-sized viewport: fall back to the stylesheet's auto sizing
@@ -117,7 +137,7 @@
       els.canvas.style.height = '';
       return;
     }
-    var ar = app.bufs.w / app.bufs.h;
+    var ar = els.canvas.width / els.canvas.height;
     var w = Math.min(vw, vh * ar);
     els.canvas.style.width = w + 'px';
     els.canvas.style.height = (w / ar) + 'px';
@@ -135,7 +155,8 @@
   }
 
   function syncProcSize() {
-    var w = PROC_WIDTHS[app.procIdx];
+    // Enhance is cheap (no vesselness), so it earns a fixed higher width
+    var w = app.mode === 'enhance' ? 640 : PROC_WIDTHS[app.procIdx];
     var h = Math.round(w / sourceAspect() / 2) * 2;
     setProcSize(w, h);
   }
@@ -265,7 +286,20 @@
 
   function renderFrame() {
     var t0 = performance.now();
+    syncDisplaySize();
     var w = app.bufs.w, h = app.bufs.h;
+    var dw = els.canvas.width, dh = els.canvas.height;
+    var src = (app.phase === 'photo' && app.photoBitmap) ? app.photoBitmap
+      : (frozenSource() || els.video);
+
+    if (app.mode === 'pulse') {
+      // pulse needs no vesselness analysis: crisp video + heat overlay
+      ctx.drawImage(src, 0, 0, dw, dh);
+      if (app.phase === 'live' && !app.frozen) renderPulseOverlay();
+      els.divider.hidden = true;
+      drawLabels();
+      return performance.now() - t0;
+    }
 
     drawSourceToProc();
     var img = app.procCtx.getImageData(0, 0, w, h);
@@ -273,29 +307,42 @@
     var still = app.phase === 'photo' || app.frozen;
     // component labeling jitters if refreshed every frame; throttle it live
     var wantLabels = app.mode === 'labels' && (still || app.labelTick++ % 12 === 0);
-    var found = V.process(img.data, app.outImage.data, app.bufs, app.state, {
+    var res = V.analyze(img.data, app.bufs, app.state, {
       mode: pipelineModeFor(app.mode),
       strength: parseFloat(els.strength.value),
       sensitivity: parseFloat(els.sensitivity.value),
       still: still,
       labels: wantLabels
     });
-    if (wantLabels) app.lastLabels = found;
+    if (wantLabels) app.lastLabels = res.labels;
+    app.skinFrac = res.skinFrac;
 
-    ctx.putImageData(app.outImage, 0, 0);
-
-    if (app.mode === 'pulse' && app.phase === 'live' && !app.frozen) {
-      renderPulseOverlay();
-    }
-
-    if (app.mode === 'split') {
-      // original feed left of the divider, processed right
-      var cut = Math.round(w * app.split);
-      if (cut > 0) {
-        var src = (app.phase === 'photo' && app.photoBitmap) ? app.photoBitmap
-          : (frozenSource() || els.video);
-        var sw = src.videoWidth || src.width, sh = src.videoHeight || src.height;
-        ctx.drawImage(src, 0, 0, sw * app.split, sh, 0, 0, cut, h);
+    if (app.mode === 'enhance') {
+      V.renderEnhance(app.bufs, app.outImage.data);
+      app.outCtx.putImageData(app.outImage, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(app.outCanvas, 0, 0, dw, dh);
+    } else {
+      // crisp base at display resolution, detection drawn on top
+      ctx.drawImage(src, 0, 0, dw, dh);
+      V.renderOverlay(app.bufs, app.outImage.data, app.mode === 'structures');
+      app.outCtx.putImageData(app.outImage, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      if (app.mode === 'split') {
+        // raw left of the divider; gently dimmed base + overlay right
+        var cut = Math.round(dw * app.split);
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(cut, 0, dw - cut, dh);
+        ctx.clip();
+        ctx.fillStyle = 'rgba(6,8,10,0.16)';
+        ctx.fillRect(cut, 0, dw - cut, dh);
+        ctx.drawImage(app.outCanvas, 0, 0, dw, dh);
+        ctx.restore();
+      } else {
+        ctx.fillStyle = 'rgba(6,8,10,0.16)';
+        ctx.fillRect(0, 0, dw, dh);
+        ctx.drawImage(app.outCanvas, 0, 0, dw, dh);
       }
     }
     els.divider.hidden = app.mode !== 'split';
@@ -363,6 +410,10 @@
   function updateReadout() {
     if (!app.bufs) return; // nothing sized yet (fresh page, pre-camera)
     var txt = app.bufs.w + 'px · ' + app.fps + ' fps' + (app.frozen ? ' · frozen' : '');
+    if (app.mode !== 'enhance' && app.mode !== 'pulse' && app.skinFrac < 0.05 &&
+        (app.phase === 'live' || app.phase === 'photo')) {
+      txt += ' · point at skin';
+    }
     if (app.mode === 'pulse' && app.phase === 'live') {
       if (app.frozen) {
         txt += ' · pulse paused';
@@ -393,7 +444,9 @@
     if (live) syncProcSize(); // catches late videoWidth changes
 
     var ms = renderFrame();
-    if (live) adaptResolution(ms);
+    // enhance/pulse are cheap and don't use the adaptive tier — measuring
+    // them would ratchet procIdx up and stall veins mode on return
+    if (live && app.mode !== 'enhance' && app.mode !== 'pulse') adaptResolution(ms);
 
     app.frameCount++;
     if (t - app.lastT > 500) {
@@ -429,15 +482,7 @@
       app.lastLabels = null;
       app.labelTick = 0;
       show('photo');
-      // run a few passes so the adaptive normalization settles
-      var img; drawSourceToProc();
-      img = app.procCtx.getImageData(0, 0, app.bufs.w, app.bufs.h);
-      for (var i = 0; i < 2; i++) {
-        V.process(img.data, app.outImage.data, app.bufs, app.state, {
-          mode: pipelineModeFor(app.mode), strength: parseFloat(els.strength.value),
-          sensitivity: parseFloat(els.sensitivity.value), still: true
-        });
-      }
+      // stills normalize directly (no EMA), so the first render is converged
       app.needsRender = true;
       startLoop();
       updateReadout();
@@ -462,6 +507,7 @@
   function setMode(m) {
     if (m === 'pulse' && app.phase === 'photo') return;
     app.mode = m;
+    if (app.bufs) syncProcSize(); // enhance runs at its own processing width
     app.needsRender = true;
     updateModeUI();
     updateReadout();

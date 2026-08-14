@@ -33,12 +33,14 @@
       seen: new Uint8Array(n),        // component labeling scratch
       stack: new Int32Array(n),
       pix: new Int32Array(n),         // pixels of the component being traced
+      mask: new Float32Array(n),      // soft skin mask, 0..1
+      normHist: new Uint32Array(256), // percentile-normalization scratch
       hist: null, lut: null           // sized lazily by clahe()
     };
   };
 
   V.makeState = function () {
-    return { dispMax: 1e-4, dispMaxB: 1e-4 };
+    return { norm: 0, normB: 0 };
   };
 
   /* ---------------- channel extraction + denoise ---------------- */
@@ -62,6 +64,147 @@
     }
     var lb = (h - 1) * w, pb = (h - 2) * w;
     for (x = 0; x < w; x++) g8[lb + x] = (f1[pb + x] + f1[lb + x] * 2) / 3;
+  }
+
+  /* ---------------- skin mask ---------------- */
+
+  // Without this, the ridge filter happily highlights hair, fabric folds,
+  // wood grain and shadow edges across the whole frame. A soft YCbCr skin
+  // gate keeps the overlay on skin; the app also uses the returned coverage
+  // to suppress the overlay entirely when almost nothing skin-like is
+  // visible (pointing the camera at a room).
+  function trap(x, a, b, c, d) {
+    if (x <= a || x >= d) return 0;
+    if (x < b) return (x - a) / (b - a);
+    if (x > c) return (d - x) / (d - c);
+    return 1;
+  }
+
+  // 3x3 box blur, Float32 in/out (softens the mask's edges)
+  function box3f(src, dst, tmp, w, h) {
+    var x, y;
+    for (y = 0; y < h; y++) {
+      var r = y * w;
+      tmp[r] = (src[r] * 2 + src[r + 1]) / 3;
+      for (x = 1; x < w - 1; x++) tmp[r + x] = (src[r + x - 1] + src[r + x] + src[r + x + 1]) / 3;
+      tmp[r + w - 1] = (src[r + w - 2] + src[r + w - 1] * 2) / 3;
+    }
+    for (x = 0; x < w; x++) dst[x] = (tmp[x] * 2 + tmp[x + w]) / 3;
+    for (y = 1; y < h - 1; y++) {
+      var a = (y - 1) * w, b = y * w, c = (y + 1) * w;
+      for (x = 0; x < w; x++) dst[b + x] = (tmp[a + x] + tmp[b + x] + tmp[c + x]) / 3;
+    }
+    var lb = (h - 1) * w, pb = (h - 2) * w;
+    for (x = 0; x < w; x++) dst[lb + x] = (tmp[pb + x] + tmp[lb + x] * 2) / 3;
+  }
+
+  // separable 3x3 min filter; out-of-bounds counts as 0 so frame borders
+  // erode too
+  function erode3(src, dst, tmp, w, h) {
+    var x, y;
+    for (y = 0; y < h; y++) {
+      var r = y * w;
+      for (x = 0; x < w; x++) {
+        var a = x > 0 ? src[r + x - 1] : 0;
+        var b = src[r + x];
+        var c = x < w - 1 ? src[r + x + 1] : 0;
+        var m = a < b ? a : b;
+        tmp[r + x] = c < m ? c : m;
+      }
+    }
+    for (y = 0; y < h; y++) {
+      var r2 = y * w, up = y > 0 ? r2 - w : -1, dn = y < h - 1 ? r2 + w : -1;
+      for (x = 0; x < w; x++) {
+        var a2 = up >= 0 ? tmp[up + x] : 0;
+        var b2 = tmp[r2 + x];
+        var c2 = dn >= 0 ? tmp[dn + x] : 0;
+        var m2 = a2 < b2 ? a2 : b2;
+        dst[r2 + x] = c2 < m2 ? c2 : m2;
+      }
+    }
+  }
+
+  // Fills bufs.mask; returns hard-coverage fraction (mask > 0.5).
+  // Uses f0/f1 as scratch — call BEFORE vesselness(), which reuses them.
+  function skinMask(rgba, bufs) {
+    var w = bufs.w, h = bufs.h, n = w * h, f0 = bufs.f0;
+    var count = 0;
+    for (var i = 0, j = 0; i < n; i++, j += 4) {
+      var r = rgba[j], g = rgba[j + 1], b = rgba[j + 2];
+      var y = 0.299 * r + 0.587 * g + 0.114 * b;
+      var cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
+      var cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
+      // soft trapezoids around the classic YCbCr skin cluster; the Cr low
+      // edge sits above warm-tinted shadows on pale fabric (measured ~135
+      // on real photos vs ≥150 for lit skin)
+      var m = trap(cr, 135, 143, 172, 184) * trap(cb, 70, 80, 126, 135);
+      if (y < 40) m *= y / 40; // too dark to carry signal either way
+      f0[i] = m;
+      if (m > 0.5) count++;
+    }
+    // shrink so the limb's silhouette edge — itself a strong dark ridge —
+    // falls outside the mask (iterations scale with resolution), then
+    // soften the boundary
+    var iters = Math.max(3, Math.round(w / 128));
+    var a2 = f0, b2 = bufs.mask;
+    for (var e = 0; e < iters; e++) {
+      erode3(a2, b2, bufs.f1, w, h);
+      var t2 = a2; a2 = b2; b2 = t2;
+    }
+    if (a2 !== bufs.mask) bufs.mask.set(a2);
+    box3f(bufs.mask, bufs.mask, bufs.f1, w, h);
+    return count / n;
+  }
+
+  // Shadows read as dark tubes too (finger gaps, the crease where an arm
+  // meets the sheet), but they are far darker than lit skin while veins
+  // are only a few percent darker. Gate the mask by brightness relative
+  // to the skin region's median green level.
+  function luminanceGate(bufs) {
+    var n = bufs.w * bufs.h, g8 = bufs.g8, mask = bufs.mask;
+    var hist = bufs.normHist;
+    hist.fill(0);
+    var count = 0, i;
+    for (i = 0; i < n; i++) {
+      if (mask[i] > 0.5) { hist[g8[i]]++; count++; }
+    }
+    if (count < 100) return;
+    var half = count / 2, acc = 0, med = 128;
+    for (i = 0; i < 256; i++) { acc += hist[i]; if (acc >= half) { med = i; break; } }
+    // veins sit at ~85-95% of the skin median; rim shading at a limb's
+    // silhouette sits well below — gate between them
+    var lo = med * 0.45, hi = med * 0.72;
+    var invSpan = 1 / Math.max(hi - lo, 1);
+    for (i = 0; i < n; i++) {
+      if (mask[i] <= 0) continue;
+      var g = g8[i];
+      if (g <= lo) mask[i] = 0;
+      else if (g < hi) mask[i] *= (g - lo) * invSpan;
+    }
+  }
+
+  // The decisive anti-silhouette step: rewrite everything outside the mask
+  // to the skin's median tone BEFORE the ridge filter runs. A boundary the
+  // filter never sees cannot fire — this is what keeps arm outlines, sheet
+  // folds and finger-gap shadows out of the overlay even though the
+  // filter's support is wider than any practical mask erosion.
+  function flattenNonSkin(bufs) {
+    var n = bufs.w * bufs.h, eq = bufs.eq, mask = bufs.mask;
+    var hist = bufs.normHist;
+    hist.fill(0);
+    var count = 0, i;
+    for (i = 0; i < n; i++) {
+      if (mask[i] > 0.5) { hist[eq[i]]++; count++; }
+    }
+    var med = 128;
+    if (count >= 100) {
+      var half = count / 2, acc = 0;
+      for (i = 0; i < 256; i++) { acc += hist[i]; if (acc >= half) { med = i; break; } }
+    }
+    for (i = 0; i < n; i++) {
+      var m = mask[i];
+      if (m < 1) eq[i] = med + (eq[i] - med) * m;
+    }
   }
 
   /* ---------------- CLAHE ---------------- */
@@ -266,11 +409,33 @@
     return { maxD: maxD, maxB: maxB };
   }
 
-  // EMA + normalize + smoothstep threshold → overlay opacity in [0, 0.92]
-  function thresholdPass(raw, smoothed, alpha, n, dispMax, sensitivity, keep) {
+  // 99th percentile of the response inside the skin mask. Normalizing by
+  // the frame max is fragile — one strong edge (a sleeve, a table) crushes
+  // every vein below threshold. The percentile tracks vein cores instead.
+  function percentileNorm(vals, mask, n, frameMax, hist) {
+    if (frameMax <= 1e-9) return 1e-4;
+    hist.fill(0);
+    var count = 0, s = 255 / frameMax;
+    for (var i = 0; i < n; i++) {
+      if (mask[i] > 0.5 && vals[i] > 0) {
+        var b = (vals[i] * s) | 0;
+        hist[b > 255 ? 255 : b]++;
+        count++;
+      }
+    }
+    if (count < 200) return frameMax;
+    var target = count * 0.01, acc = 0, bin = 255;
+    for (; bin > 0; bin--) { acc += hist[bin]; if (acc >= target) break; }
+    return Math.max(bin / 255 * frameMax, frameMax * 0.05, 1e-4);
+  }
+
+  // EMA + normalize + smoothstep threshold, gated by the skin mask and the
+  // global coverage scale → overlay opacity in [0, 0.92]
+  function thresholdPass(raw, smoothed, alpha, mask, n, norm, sensitivity, keep, covScale) {
     var t = 0.65 * (1 - sensitivity) + 0.06;
     var invSpan = 1 / Math.max(1 - t, 1e-3);
-    var invMax = 1 / dispMax;
+    var invMax = 1 / Math.max(norm, 1e-6);
+    var gain = 0.92 * covScale;
     for (var i = 0; i < n; i++) {
       var sm = smoothed[i] * keep + raw[i] * (1 - keep);
       smoothed[i] = sm;
@@ -278,7 +443,7 @@
       if (a <= 0) { alpha[i] = 0; continue; }
       if (a > 1) a = 1;
       a = a * a * (3 - 2 * a); // smoothstep: soft toe and shoulder
-      alpha[i] = a * 0.92;
+      alpha[i] = a * gain * mask[i];
     }
   }
 
@@ -340,75 +505,76 @@
     return comps.slice(0, 9);
   }
 
-  /* ---------------- composite ---------------- */
+  /* ---------------- rendering ---------------- */
 
   var ACC_R = 70, ACC_G = 235, ACC_B = 200;    // vein-like: teal
   var RID_R = 255, RID_G = 176, RID_B = 66;    // tendon-like ridge: amber
 
-  function composeEnhance(bufs, outRGBA) {
+  // Grayscale CLAHE view (Enhance mode replaces the video entirely).
+  V.renderEnhance = function (bufs, outRGBA) {
     var eq = bufs.eq, n = bufs.w * bufs.h;
     for (var i = 0, j = 0; i < n; i++, j += 4) {
       var v = eq[i];
       outRGBA[j] = v; outRGBA[j + 1] = v; outRGBA[j + 2] = v; outRGBA[j + 3] = 255;
     }
-  }
+  };
 
-  function composeOverlay(bufs, srcRGBA, outRGBA, withBright) {
+  // Alpha-carrying overlay: the app drawImages this over crisp full-res
+  // video, so detection quality and display quality are decoupled.
+  V.renderOverlay = function (bufs, outRGBA, withBright) {
     var alpha = bufs.alpha, alphaB = bufs.alphaB, n = bufs.w * bufs.h;
     for (var i = 0, j = 0; i < n; i++, j += 4) {
-      // base: original, half-desaturated and dimmed so the overlay reads
-      var r = srcRGBA[j], g = srcRGBA[j + 1], b = srcRGBA[j + 2];
-      var m = (r + g + b) * 0.3333;
-      r = (r + (m - r) * 0.55) * 0.78;
-      g = (g + (m - g) * 0.55) * 0.78;
-      b = (b + (m - b) * 0.55) * 0.78;
       var a = alpha[i];
-      if (a > 0) {
-        r += (ACC_R - r) * a; g += (ACC_G - g) * a; b += (ACC_B - b) * a;
+      if (withBright && alphaB[i] > a) {
+        outRGBA[j] = RID_R; outRGBA[j + 1] = RID_G; outRGBA[j + 2] = RID_B;
+        outRGBA[j + 3] = (alphaB[i] * 255) | 0;
+      } else {
+        outRGBA[j] = ACC_R; outRGBA[j + 1] = ACC_G; outRGBA[j + 2] = ACC_B;
+        outRGBA[j + 3] = (a * 255) | 0;
       }
-      if (withBright) {
-        var ab = alphaB[i];
-        if (ab > 0) {
-          r += (RID_R - r) * ab; g += (RID_G - g) * ab; b += (RID_B - b) * ab;
-        }
-      }
-      outRGBA[j] = r; outRGBA[j + 1] = g; outRGBA[j + 2] = b; outRGBA[j + 3] = 255;
     }
-  }
+  };
 
   /* ---------------- main entry ---------------- */
 
   // params: { mode: 'enhance' | 'veins' | 'structures', strength: 0..1,
   //           sensitivity: 0..1, still: bool, labels: bool }
-  // Returns an array of labeled components when params.labels is set,
-  // otherwise null.
-  V.process = function (rgba, outRGBA, bufs, state, params) {
+  // Fills bufs.eq (always) and bufs.alpha/alphaB (overlay modes); returns
+  // { labels: [...]|null, skinFrac: 0..1 }.
+  V.analyze = function (rgba, bufs, state, params) {
     var w = bufs.w, h = bufs.h, n = w * h;
 
     extractGreenDenoised(rgba, bufs);
     clahe(bufs, 1.2 + params.strength * 4.3);
 
     if (params.mode === 'enhance') {
-      composeEnhance(bufs, outRGBA);
-      return null;
+      return { labels: null, skinFrac: 1 };
     }
 
+    var skinFrac = skinMask(rgba, bufs); // must run before vesselness (scratch reuse)
+    luminanceGate(bufs);
+    flattenNonSkin(bufs);
     var wantBright = params.mode === 'structures';
     // physical vein widths are resolution-independent: scale sigmas with w
     var k = w / 384;
-    var res = vesselness(bufs, [1.5 * k, 3.0 * k, 5.0 * k], wantBright);
+    var res = vesselness(bufs, [1.4 * k, 2.6 * k, 4.2 * k], wantBright);
     var keep = params.still ? 0 : 0.35;
+    // almost no skin in frame → fade the whole overlay out instead of
+    // decorating the furniture
+    var cov = (skinFrac - 0.03) / 0.05;
+    if (cov < 0) cov = 0; else if (cov > 1) cov = 1;
 
-    state.dispMax = Math.max(res.maxD, state.dispMax * 0.9, 1e-4);
-    thresholdPass(bufs.vess, bufs.vessS, bufs.alpha, n, state.dispMax, params.sensitivity, keep);
+    var p = percentileNorm(bufs.vess, bufs.mask, n, res.maxD, bufs.normHist);
+    state.norm = (params.still || !state.norm) ? p : state.norm * 0.75 + p * 0.25;
+    thresholdPass(bufs.vess, bufs.vessS, bufs.alpha, bufs.mask, n, state.norm, params.sensitivity, keep, cov);
 
     if (wantBright) {
-      state.dispMaxB = Math.max(res.maxB, state.dispMaxB * 0.9, 1e-4);
-      thresholdPass(bufs.vessB, bufs.vessBS, bufs.alphaB, n, state.dispMaxB, params.sensitivity, keep);
+      var pB = percentileNorm(bufs.vessB, bufs.mask, n, res.maxB, bufs.normHist);
+      state.normB = (params.still || !state.normB) ? pB : state.normB * 0.75 + pB * 0.25;
+      thresholdPass(bufs.vessB, bufs.vessBS, bufs.alphaB, bufs.mask, n, state.normB, params.sensitivity, keep, cov);
     }
-    composeOverlay(bufs, rgba, outRGBA, wantBright);
 
-    return params.labels ? findComponents(bufs) : null;
+    return { labels: params.labels ? findComponents(bufs) : null, skinFrac: skinFrac };
   };
 
   /* ---------------- pulse (remote photoplethysmography) ---------------- */

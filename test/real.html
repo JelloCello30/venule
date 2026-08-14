@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>venule — real-photo check</title>
+<style>
+  body { font-family: ui-monospace, Menlo, monospace; background: #0c0e10; color: #e9ebe7; padding: 20px; }
+  h1 { font-size: 15px; margin-bottom: 10px; }
+  #report { font-size: 12px; white-space: pre; background: #15181b; padding: 12px; border-radius: 8px; margin-bottom: 14px; }
+  .row { display: flex; gap: 8px; margin-bottom: 14px; align-items: flex-start; }
+  .row figure { margin: 0; }
+  .row figcaption { font-size: 10px; color: #97a19c; margin-top: 3px; }
+  canvas { border: 1px solid rgba(255,255,255,.12); width: 300px; }
+</style>
+</head>
+<body>
+<h1>venule real-photo check — fixtures are local only (gitignored)</h1>
+<div id="report">running…</div>
+<div id="grid"></div>
+
+<script src="../js/vision.js"></script>
+<script>
+(async function () {
+  'use strict';
+  var V = window.VenuleVision;
+  var FILES = ['handvein.jpg', 'armveins.jpg', 'hands.jpg', 'forearm.jpg', 'skin.jpg', 'clutter.jpg'];
+  var report = {};
+
+  function loadImg(src) {
+    return new Promise(function (res, rej) {
+      var im = new Image();
+      im.onload = function () { res(im); };
+      im.onerror = rej;
+      im.src = src;
+    });
+  }
+
+  function panel(row, caption, w, h) {
+    var fig = document.createElement('figure');
+    var c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    var cap = document.createElement('figcaption');
+    cap.textContent = caption;
+    fig.appendChild(c); fig.appendChild(cap);
+    row.appendChild(fig);
+    return c;
+  }
+
+  for (var fi = 0; fi < FILES.length; fi++) {
+    var f = FILES[fi];
+    var img;
+    try { img = await loadImg('fixtures/' + f); } catch (e) { continue; }
+    var W = Math.min(512, img.naturalWidth);
+    var H = Math.round(img.naturalHeight * W / img.naturalWidth / 2) * 2;
+
+    var row = document.createElement('div');
+    row.className = 'row';
+    document.getElementById('grid').appendChild(row);
+
+    var cIn = panel(row, f + ' — original', W, H);
+    var xin = cIn.getContext('2d');
+    xin.drawImage(img, 0, 0, W, H);
+    var data = xin.getImageData(0, 0, W, H);
+
+    var bufs = V.makeBuffers(W, H);
+    var state = V.makeState();
+    var res = V.analyze(data.data, bufs, state,
+      { mode: 'veins', strength: 0.6, sensitivity: 0.55, still: true, labels: true });
+
+    // mask panel
+    var cM = panel(row, 'skin mask (' + (res.skinFrac * 100).toFixed(0) + '%)', W, H);
+    var im2 = cM.getContext('2d').createImageData(W, H);
+    for (var i = 0, j = 0; i < W * H; i++, j += 4) {
+      var m = bufs.mask[i] * 255;
+      im2.data[j] = m; im2.data[j + 1] = m; im2.data[j + 2] = m; im2.data[j + 3] = 255;
+    }
+    cM.getContext('2d').putImageData(im2, 0, 0);
+
+    // enhance panel
+    var cE = panel(row, 'green + CLAHE', W, H);
+    var im3 = cE.getContext('2d').createImageData(W, H);
+    V.renderEnhance(bufs, im3.data);
+    cE.getContext('2d').putImageData(im3, 0, 0);
+
+    // composite panel (what the app shows)
+    var cO = panel(row, 'veins overlay', W, H);
+    var xo = cO.getContext('2d');
+    xo.drawImage(img, 0, 0, W, H);
+    xo.fillStyle = 'rgba(6,8,10,0.16)';
+    xo.fillRect(0, 0, W, H);
+    var ov = xo.createImageData(W, H);
+    V.renderOverlay(bufs, ov.data, false);
+    var ovC = document.createElement('canvas');
+    ovC.width = W; ovC.height = H;
+    ovC.getContext('2d').putImageData(ov, 0, 0);
+    xo.drawImage(ovC, 0, 0);
+
+    // overlay statistics
+    var aSum = 0, aN = 0, aOn = 0;
+    for (var q = 0; q < W * H; q++) {
+      var a = bufs.alpha[q];
+      aSum += a;
+      if (a > 0.25) aOn++;
+      if (bufs.mask[q] > 0.5) aN++;
+    }
+    report[f] = {
+      skin: +(res.skinFrac).toFixed(3),
+      litFracOfSkin: aN ? +(aOn / aN).toFixed(4) : 0,
+      labels: res.labels ? res.labels.length : 0
+    };
+  }
+
+  document.getElementById('report').textContent = JSON.stringify(report, null, 1);
+  window.__real = report;
+})();
+</script>
+</body>
+</html>

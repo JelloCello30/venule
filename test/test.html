@@ -113,23 +113,36 @@
 
   var bufs = V.makeBuffers(W, H);
   var state = V.makeState();
-  var out = new ImageData(W, H);
   var params = { mode: 'veins', strength: 0.6, sensitivity: 0.55, still: true };
 
   var t0 = performance.now();
-  V.process(input.data, out.data, bufs, state, params);   // pass 1: settle dispMax
-  V.process(input.data, out.data, bufs, state, params);   // pass 2: measured
+  var res1 = V.analyze(input.data, bufs, state, params);
+  V.analyze(input.data, bufs, state, params);
   var ms = (performance.now() - t0) / 2;
+  var skinFrac = res1.skinFrac;
 
   // labels mode: components should land on the drawn veins
   params.labels = true;
-  var comps = V.process(input.data, out.data, bufs, state, params) || [];
+  var comps = V.analyze(input.data, bufs, state, params).labels || [];
   params.labels = false;
+
+  // veins composite panel: crisp base + alpha overlay, like the app draws
+  var oc = document.getElementById('c-out');
+  oc.width = W; oc.height = H;
+  var octx = oc.getContext('2d');
+  octx.drawImage(document.getElementById('c-in'), 0, 0);
+  octx.fillStyle = 'rgba(6,8,10,0.16)';
+  octx.fillRect(0, 0, W, H);
+  var ovImg = new ImageData(W, H);
+  V.renderOverlay(bufs, ovImg.data, false);
+  var ovC = document.createElement('canvas');
+  ovC.width = W; ovC.height = H;
+  ovC.getContext('2d').putImageData(ovImg, 0, 0);
+  octx.drawImage(ovC, 0, 0);
 
   // structures mode: must run without errors and produce a bright-ridge map
   var stateB = V.makeState();
-  var outB = new ImageData(W, H);
-  V.process(input.data, outB.data, bufs, stateB, { mode: 'structures', strength: 0.6, sensitivity: 0.55, still: true });
+  V.analyze(input.data, bufs, stateB, { mode: 'structures', strength: 0.6, sensitivity: 0.55, still: true });
   var brightOk = bufs.vessB.some(function (v) { return v > 0; });
 
   // pulse mode: left half of a synthetic clip oscillates at 1.2 Hz (72 bpm)
@@ -162,15 +175,11 @@
   var pulseOk = pulseRatio >= 3 && est.conf >= 0.3 && est.bpm >= 60 && est.bpm <= 84;
 
   grayToCanvas('c-eq', bufs.eq, 1);
-  var invMax = 255 / state.dispMax;
-  grayToCanvas('c-vess', bufs.vess, invMax / 255 * 255);
-  document.getElementById('c-out').width = W;
-  document.getElementById('c-out').height = H;
-  document.getElementById('c-out').getContext('2d').putImageData(out, 0, 0);
+  grayToCanvas('c-vess', bufs.vess, 180 / state.norm);
 
   // metrics: normalized vesselness on-vein vs clearly-off-vein
   var onSum = 0, onN = 0, offSum = 0, offN = 0, eqOn = 0, eqOff = 0;
-  var inv = 1 / state.dispMax;
+  var inv = 1 / state.norm;
   for (var i = 0; i < W * H; i++) {
     var x = i % W, y = (i / W) | 0;
     if (x < 8 || y < 8 || x >= W - 8 || y >= H - 8) continue;
@@ -189,9 +198,10 @@
   });
   var precision = comps.length ? hits / comps.length : 0;
 
-  var pass = ratio >= 2.5 && onMean >= 0.10 && eqDrop >= 8 &&
+  var pass = ratio >= 2.5 && onMean >= 0.10 && eqDrop >= 8 && skinFrac >= 0.5 &&
     comps.length >= 2 && comps.length <= 9 && precision >= 0.6 && brightOk && pulseOk;
   var lines = [
+    'skin mask coverage      : ' + (skinFrac * 100).toFixed(0) + '%      (need ≥ 50%)',
     'vesselness on-vein mean : ' + onMean.toFixed(4) + '   (need ≥ 0.10)',
     'vesselness off-vein mean: ' + offMean.toFixed(4),
     'on/off ratio            : ' + ratio.toFixed(2) + '     (need ≥ 2.5)',
