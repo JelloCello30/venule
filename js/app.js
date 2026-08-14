@@ -126,6 +126,7 @@
     segTick: 0,
     stillSegDone: false,
     motion: 0,
+    compareRaw: false,
     blackTick: 0,
     blackCount: 0,
     debug: /[?&]debug=1/.test(location.search),
@@ -184,7 +185,7 @@
     else if (frozenSource()) { sw = app.stillCanvas.width; sh = app.stillCanvas.height; }
     else if (els.video.videoWidth) { sw = els.video.videoWidth; sh = els.video.videoHeight; }
     else return;
-    var cap = isPhoto ? 1600 : 1280;
+    var cap = 1600;
     var sc = Math.min(1, cap / sw);
     var W = Math.round(sw * sc / 2) * 2, H = Math.round(sh * sc / 2) * 2;
     if (els.canvas.width !== W || els.canvas.height !== H) {
@@ -268,8 +269,8 @@
       audio: false,
       video: {
         facingMode: { ideal: app.facing },
-        width: { ideal: 1280 },
-        height: { ideal: 720 }
+        width: { ideal: 1920 },
+        height: { ideal: 1080 }
       }
     };
     navigator.mediaDevices.getUserMedia(constraints).then(function (stream) {
@@ -282,7 +283,9 @@
       app.multiCam = devices.filter(function (d) { return d.kind === 'videoinput'; }).length > 1;
       app.photoBitmap = null;
       setFrozen(false);
+      setupTorch();
       syncProcSize();
+      showHint('back of your hand · bright light · hold still');
       show('live');
       startLoop();
     }).catch(function (err) {
@@ -363,6 +366,15 @@
       if (app.phase === 'live' && !app.frozen) renderPulseOverlay();
       els.divider.hidden = true;
       drawLabels();
+      return performance.now() - t0;
+    }
+
+    if (app.compareRaw) {
+      // press-and-hold raw peek: just the source, nothing drawn over it
+      ctx.drawImage(src, 0, 0, dw, dh);
+      els.divider.hidden = true;
+      ctxL.setTransform(1, 0, 0, 1, 0, 0);
+      ctxL.clearRect(0, 0, els.labels.width, els.labels.height);
       return performance.now() - t0;
     }
 
@@ -512,8 +524,9 @@
         (app.phase === 'live' || app.phase === 'photo')) {
       txt += ' · point at skin';
     }
-    if (app.mode === 'reveal' && app.phase === 'live' && !app.frozen && app.motion > 6) {
-      txt += ' · hold still to stack';
+    if (app.mode === 'reveal' && app.phase === 'live' && !app.frozen) {
+      if (app.motion > 6) txt += ' · hold still to stack';
+      else if (app.motion < 3 && app.state && app.state.stacked) txt += ' · stacked';
     }
     if (app.debug) {
       txt += ' · ' + (seg.status === 'ready' ? 'ai-mask' : 'color-mask (' + seg.status + ')') +
@@ -549,9 +562,9 @@
     if (live) syncProcSize(); // catches late videoWidth changes
 
     var ms = renderFrame();
-    // pulse is cheap and doesn't use the adaptive tier — measuring it
-    // would ratchet procIdx up and stall the other modes on return
-    if (live && app.mode !== 'pulse') adaptResolution(ms);
+    // pulse and raw-peek frames are cheap and don't use the adaptive tier —
+    // measuring them would ratchet procIdx up and stall on return
+    if (live && app.mode !== 'pulse' && !app.compareRaw) adaptResolution(ms);
 
     app.frameCount++;
     if (t - app.lastT > 500) {
@@ -575,6 +588,9 @@
   function openPhoto(file) {
     createImageBitmap(file).then(function (bmp) {
       stopStream();
+      // the stream just died, and the torch with it — drop its stale button
+      torchOn = false;
+      document.getElementById('btn-torch').hidden = true;
       app.photoBitmap = bmp;
       app.stillSegDone = false;
       setFrozen(false);
@@ -677,13 +693,30 @@
   }
   var dragging = false;
   els.stage.addEventListener('pointerdown', function (e) {
-    if (app.mode !== 'split') return;
-    dragging = true;
-    els.stage.setPointerCapture(e.pointerId);
-    setSplit(e.clientX);
+    if (app.mode === 'split') {
+      dragging = true;
+      els.stage.setPointerCapture(e.pointerId);
+      setSplit(e.clientX);
+      return;
+    }
+    // press-and-hold anywhere shows the raw feed (before/after, like photo
+    // editors); release returns to the processed view. Capture the pointer:
+    // a mouse released over the fixed control bar would otherwise never
+    // deliver pointerup back here and the peek would stick on.
+    if (app.mode !== 'pulse' && e.button === 0) {
+      try { els.stage.setPointerCapture(e.pointerId); } catch (err) { /* inactive pointer */ }
+      app.compareRaw = true;
+      app.needsRender = true;
+    }
   });
   els.stage.addEventListener('pointermove', function (e) { if (dragging) setSplit(e.clientX); });
-  els.stage.addEventListener('pointerup', function () { dragging = false; });
+  function endPointer() {
+    dragging = false;
+    if (app.compareRaw) { app.compareRaw = false; app.needsRender = true; }
+  }
+  els.stage.addEventListener('pointerup', endPointer);
+  els.stage.addEventListener('pointercancel', endPointer);
+  els.stage.addEventListener('lostpointercapture', endPointer);
   els.divider.style.left = '50%';
 
   /* drag & drop a photo anywhere */
@@ -707,13 +740,50 @@
   });
 
   document.addEventListener('visibilitychange', function () {
-    if (document.hidden) cancelAnimationFrame(app.rafId);
-    else startLoop();
+    if (document.hidden) {
+      cancelAnimationFrame(app.rafId);
+      endPointer(); // a mouse released while hidden never sends pointerup
+    } else {
+      startLoop();
+    }
   });
 
   function showToast(msg) {
     var t = document.getElementById('errtoast');
     if (t) { t.textContent = msg; t.hidden = false; }
+  }
+
+  var hintTimer = 0;
+  function showHint(msg) {
+    var el2 = document.getElementById('hint');
+    if (!el2) return;
+    el2.textContent = msg;
+    el2.hidden = false;
+    el2.classList.remove('fade');
+    clearTimeout(hintTimer);
+    hintTimer = setTimeout(function () { el2.classList.add('fade'); }, 4500);
+  }
+
+  // torch (flashlight) — Android Chrome exposes it via track capabilities;
+  // hidden everywhere else
+  var torchOn = false;
+  function setupTorch() {
+    var btn = document.getElementById('btn-torch');
+    torchOn = false;
+    btn.hidden = true;
+    if (!app.stream) return;
+    var track = app.stream.getVideoTracks()[0];
+    if (!track || !track.getCapabilities) return;
+    var caps = track.getCapabilities();
+    if (!caps || !caps.torch) return;
+    btn.hidden = false;
+    btn.textContent = 'Light';
+    btn.onclick = function () {
+      torchOn = !torchOn;
+      track.applyConstraints({ advanced: [{ torch: torchOn }] }).then(function () {
+        btn.textContent = torchOn ? 'Light ·on' : 'Light';
+      }).catch(function () { btn.hidden = true; });
+    };
   }
 
   // surface hard failures on screen — a silent white/black page is

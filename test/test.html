@@ -192,6 +192,43 @@
   var stackedNoise = offNoise(rev.data);
   var stackDrop = stackedNoise / Math.max(singleNoise, 1e-9);
 
+  // alignment: 25 frames with random ±5px global shifts (simulated hand
+  // shake) — the motion-compensated stack must keep veins sharp where an
+  // unaligned average would smear them away
+  function shiftedNoisyFrame(dx, dy) {
+    var f = new Uint8ClampedArray(W * H * 4);
+    for (var y2 = 0; y2 < H; y2++) {
+      var sy = Math.min(H - 1, Math.max(0, y2 + dy));
+      for (var x2 = 0; x2 < W; x2++) {
+        var sx = Math.min(W - 1, Math.max(0, x2 + dx));
+        var si = (sy * W + sx) * 4, di = (y2 * W + x2) * 4;
+        var nz = (rnd() - 0.5) * 12;
+        f[di] = pristine[si] + nz; f[di + 1] = pristine[si + 1] + nz;
+        f[di + 2] = pristine[si + 2] + nz; f[di + 3] = 255;
+      }
+    }
+    return f;
+  }
+  var stateA = V.makeState();
+  V.analyzeReveal(shiftedNoisyFrame(0, 0), rev.data, bufs, stateA, { strength: 0.6, still: false });
+  for (var af = 0; af < 25; af++) {
+    var adx = ((rnd() * 11) | 0) - 5, ady = ((rnd() * 11) | 0) - 5;
+    V.analyzeReveal(shiftedNoisyFrame(adx, ady), rev.data, bufs, stateA, { strength: 0.6, still: false });
+  }
+  // land on an unshifted frame so output coordinates match the truth mask
+  V.analyzeReveal(shiftedNoisyFrame(0, 0), rev.data, bufs, stateA, { strength: 0.6, still: false });
+  var aOn2 = 0, aOnN2 = 0;
+  for (var ai = 0; ai < W * H; ai++) {
+    var ax = ai % W, ay = (ai / W) | 0;
+    if (ax < 12 || ay < 12 || ax >= W - 12 || ay >= H - 12) continue;
+    if (!truth[ai]) continue;
+    var ad = rev.data[ai * 4 + 1] - 128;
+    aOn2 += ad < 0 ? -ad : ad; aOnN2++;
+  }
+  var alignedOn = aOn2 / aOnN2;
+  var alignedNoise = offNoise(rev.data);
+  var alignDrop = alignedNoise / Math.max(singleNoise, 1e-9);
+
   // pulse mode: left half of a synthetic clip oscillates at 1.2 Hz (72 bpm)
   // under noise; the energy map must localize it and the BPM must be right
   var PW = 120, PH = 90;
@@ -245,7 +282,8 @@
   });
   var precision = comps.length ? hits / comps.length : 0;
 
-  var revealOk = revealRatio >= 1.8 && revOn >= 8 && stackDrop <= 0.75;
+  var revealOk = revealRatio >= 1.8 && revOn >= 8 && stackDrop <= 0.75 &&
+    alignedOn >= 8 && alignDrop <= 0.85;
   var pass = ratio >= 2.5 && onMean >= 0.10 && eqDrop >= 8 && skinFrac >= 0.5 &&
     comps.length >= 2 && comps.length <= 9 && precision >= 0.6 && brightOk && pulseOk && revealOk;
   var lines = [
@@ -253,6 +291,8 @@
     'reveal on-vein amp      : ' + revOn.toFixed(1) + '       (need ≥ 8)',
     'reveal on/off ratio     : ' + revealRatio.toFixed(2) + '     (need ≥ 1.8)',
     'stacking noise drop     : ' + (stackDrop * 100).toFixed(0) + '% of single frame (need ≤ 75%)',
+    'shaken-stack vein amp   : ' + alignedOn.toFixed(1) + '       (±5px shake, need ≥ 8)',
+    'shaken-stack noise      : ' + (alignDrop * 100).toFixed(0) + '% of single frame (need ≤ 85%)',
     'vesselness on-vein mean : ' + onMean.toFixed(4) + '   (need ≥ 0.10)',
     'vesselness off-vein mean: ' + offMean.toFixed(4),
     'on/off ratio            : ' + ratio.toFixed(2) + '     (need ≥ 2.5)',

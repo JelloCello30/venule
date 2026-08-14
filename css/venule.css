@@ -235,6 +235,17 @@ body.app {
 }
 .action-row button:hover { border-color: var(--mut-d); }
 
+#hint {
+  position: fixed; left: 50%; bottom: calc(200px + env(safe-area-inset-bottom));
+  transform: translateX(-50%); z-index: 18; white-space: nowrap;
+  font-family: var(--mono); font-size: 12px; color: var(--fg);
+  background: rgba(12, 14, 16, 0.72); border: 1px solid var(--line-d);
+  border-radius: 999px; padding: 7px 16px;
+  opacity: 1; transition: opacity 0.9s ease;
+  pointer-events: none;
+}
+#hint.fade { opacity: 0; }
+
 #errtoast {
   position: fixed; left: 50%; bottom: calc(140px + env(safe-area-inset-bottom));
   transform: translateX(-50%); z-index: 20; max-width: 90vw;

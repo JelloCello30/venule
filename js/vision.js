@@ -39,6 +39,8 @@
       avgG: new Float32Array(n),
       avgB: new Float32Array(n),
       mean: new Float32Array(n),      // local-mean scratch for Reveal
+      ds1: new Float32Array(Math.max(1, w >> 2) * Math.max(1, h >> 2)), // alignment pyramids
+      ds2: new Float32Array(Math.max(1, w >> 2) * Math.max(1, h >> 2)),
       hist: null, lut: null           // sized lazily by clahe()
     };
   };
@@ -562,13 +564,44 @@
     }
   }
 
-  // Temporal stacking: motion-adaptive EMA of the RGB frame. Holding still
-  // for ~a second averages ~10-20 frames, so the vein-band amplification
-  // boosts signal instead of sensor grain.
+  // 4x downsample (block mean) for the coarse alignment pass
+  function downsample4(getPx, w, h, out, sw, sh) {
+    for (var y = 0; y < sh; y++) {
+      var y0 = y * 4;
+      for (var x = 0; x < sw; x++) {
+        var x0 = x * 4, acc = 0, cnt = 0;
+        for (var yy = y0; yy < y0 + 4 && yy < h; yy++) {
+          for (var xx = x0; xx < x0 + 4 && xx < w; xx++) { acc += getPx(yy * w + xx); cnt++; }
+        }
+        out[y * sw + x] = acc / cnt;
+      }
+    }
+  }
+
+  // dst = src translated by (dx, dy) with edge clamping
+  function copyShift(src, dst, w, h, dx, dy) {
+    for (var y = 0; y < h; y++) {
+      var sy = y + dy;
+      if (sy < 0) sy = 0; else if (sy >= h) sy = h - 1;
+      var srow = sy * w, drow = y * w;
+      for (var x = 0; x < w; x++) {
+        var sx = x + dx;
+        if (sx < 0) sx = 0; else if (sx >= w) sx = w - 1;
+        dst[drow + x] = src[srow + sx];
+      }
+    }
+  }
+
+  // Temporal stacking with global motion compensation. Handheld phone +
+  // living subject means pure EMA either smears or never accumulates; a
+  // coarse-to-fine translation search aligns the stack to each new frame
+  // (real night modes do the same, plus rotation we can live without).
+  // Exposure is normalized first so auto-exposure breathing doesn't read
+  // as motion and flush the stack.
   function updateStack(rgba, bufs, state, still) {
-    var n = bufs.w * bufs.h;
-    var aR = bufs.avgR, aG = bufs.avgG, aB = bufs.avgB;
-    var i, j;
+    var w = bufs.w, h = bufs.h, n = w * h;
+    var aR = bufs.avgR, aG = bufs.avgG, aB = bufs.avgB, g8 = bufs.g8;
+    var i, j, x, y;
     if (still || !state.stacked) {
       for (i = 0, j = 0; i < n; i++, j += 4) {
         aR[i] = rgba[j]; aG[i] = rgba[j + 1]; aB[i] = rgba[j + 2];
@@ -577,20 +610,80 @@
       state.motion = 0;
       return;
     }
-    // estimate motion on a sparse grid before committing the blend rate
-    var diff = 0, cnt = 0;
-    for (i = 0; i < n; i += 7) {
-      var d = rgba[i * 4 + 1] - aG[i];
-      diff += d < 0 ? -d : d;
-      cnt++;
+
+    var sw = Math.max(1, w >> 2), sh = Math.max(1, h >> 2);
+    var dsS = bufs.ds1, dsF = bufs.ds2;
+    downsample4(function (p) { return aG[p]; }, w, h, dsS, sw, sh);
+    downsample4(function (p) { return g8[p]; }, w, h, dsF, sw, sh);
+
+    // exposure ratio stack/frame, clamped — applied to the incoming frame
+    var mS = 0, mF = 0, sn = sw * sh;
+    for (i = 0; i < sn; i++) { mS += dsS[i]; mF += dsF[i]; }
+    var expo = mF > 1 ? mS / mF : 1;
+    if (expo < 0.85) expo = 0.85; else if (expo > 1.18) expo = 1.18;
+    for (i = 0; i < sn; i++) dsF[i] *= expo;
+
+    // coarse translation search at 1/4 resolution (±4 cells = ±16 px)
+    var R = 4, best = Infinity, bdx = 0, bdy = 0;
+    for (var dy = -R; dy <= R; dy++) {
+      for (var dx = -R; dx <= R; dx++) {
+        var sad = 0, cnt = 0;
+        for (y = R; y < sh - R; y += 2) {
+          var fr = y * sw, sr = (y + dy) * sw + dx;
+          for (x = R; x < sw - R; x += 2) {
+            var d = dsF[fr + x] - dsS[sr + x];
+            sad += d < 0 ? -d : d;
+            cnt++;
+          }
+        }
+        sad /= cnt;
+        if (sad < best) { best = sad; bdx = dx; bdy = dy; }
+      }
     }
-    var motion = diff / cnt;
-    state.motion = motion;
-    var alpha = motion > 14 ? 0.65 : motion > 6 ? 0.3 : 0.09;
-    for (i = 0, j = 0; i < n; i++, j += 4) {
-      aR[i] += alpha * (rgba[j] - aR[i]);
-      aG[i] += alpha * (rgba[j + 1] - aG[i]);
-      aB[i] += alpha * (rgba[j + 2] - aB[i]);
+
+    // refine at full resolution around the coarse winner (±3 px)
+    var cx = bdx * 4, cy = bdy * 4;
+    var bestF = Infinity, fdx = cx, fdy = cy;
+    var M = 20; // stay away from clamped borders
+    for (var ry = cy - 3; ry <= cy + 3; ry++) {
+      for (var rx = cx - 3; rx <= cx + 3; rx++) {
+        var sadF = 0, cntF = 0;
+        for (y = M; y < h - M; y += 3) {
+          var frow = y * w, srow = (y + ry) * w + rx;
+          for (x = M; x < w - M; x += 3) {
+            var dF = g8[frow + x] * expo - aG[srow + x];
+            sadF += dF < 0 ? -dF : dF;
+            cntF++;
+          }
+        }
+        sadF /= cntF;
+        if (sadF < bestF) { bestF = sadF; fdx = rx; fdy = ry; }
+      }
+    }
+    state.motion = bestF; // residual AFTER alignment — true scene change
+
+    if (bestF > 26) {
+      // scene replaced (new arm position, camera swung) — restart cleanly
+      for (i = 0, j = 0; i < n; i++, j += 4) {
+        aR[i] = rgba[j]; aG[i] = rgba[j + 1]; aB[i] = rgba[j + 2];
+      }
+      return;
+    }
+
+    var alpha = bestF > 10 ? 0.5 : bestF > 4 ? 0.22 : 0.08;
+    var chans = [aR, aG, aB];
+    for (var c = 0; c < 3; c++) {
+      var av = chans[c];
+      if (fdx !== 0 || fdy !== 0) {
+        copyShift(av, bufs.mean, w, h, fdx, fdy);
+        for (i = 0, j = c; i < n; i++, j += 4) {
+          av[i] = bufs.mean[i] + alpha * (rgba[j] * expo - bufs.mean[i]);
+        }
+      } else {
+        for (i = 0, j = c; i < n; i++, j += 4) {
+          av[i] += alpha * (rgba[j] * expo - av[i]);
+        }
+      }
     }
   }
 
@@ -721,6 +814,8 @@
       fast: new Float32Array(n),
       slow: new Float32Array(n),
       energy: new Float32Array(n),
+      smoothA: new Float32Array(n),   // spatially smoothed energy for display
+      smoothB: new Float32Array(n),
       eMax: 1e-6,
       primed: false,
       lastT: 0,
@@ -808,8 +903,11 @@
   V.pulseCompose = function (st, outRGBA, gain) {
     var n = st.w * st.h;
     var invMax = 1 / st.eMax;
+    // spatial smoothing: pulse is a regional signal, per-pixel speckle is noise
+    box3f(st.energy, st.smoothA, st.smoothB, st.w, st.h);
+    box3f(st.smoothA, st.smoothA, st.smoothB, st.w, st.h);
     for (var i = 0, j = 0; i < n; i++, j += 4) {
-      var a = st.energy[i] * invMax * gain;
+      var a = st.smoothA[i] * invMax * gain;
       if (a > 1) a = 1;
       a = a * a * (3 - 2 * a);
       outRGBA[j] = 255; outRGBA[j + 1] = 96; outRGBA[j + 2] = 92;
