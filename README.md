@@ -17,20 +17,12 @@ python3 serve.py          # http://localhost:4179
 Camera capture requires a secure context: `localhost` works, plain `http://` on
 a LAN IP does not. For phones, deploy to HTTPS (below) or use `Open a photo`.
 
-## Deploy (GitHub Pages)
+## Deploy
 
-The site is fully static — push the folder and enable Pages:
-
-```
-cd ~/venule
-git init && git add -A && git commit -m "venule"
-git remote add origin git@github.com:JelloCello30/venule.git
-git push -u origin main
-```
-
-Then GitHub → repo → Settings → Pages → Deploy from branch → `main` / root.
-Pages serves over HTTPS, so the camera works on phones out of the box. A custom
-domain works the same way.
+Live at **https://jellocello30.github.io/venule/** (GitHub Pages, repo
+`JelloCello30/venule`, deploy-from-branch `main` / root). Push to `main` to
+redeploy. Pages serves over HTTPS, so phone cameras work out of the box. A
+custom domain can be added in the repo's Pages settings.
 
 ## How it works
 
