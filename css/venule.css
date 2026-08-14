@@ -235,4 +235,12 @@ body.app {
 }
 .action-row button:hover { border-color: var(--mut-d); }
 
+#errtoast {
+  position: fixed; left: 50%; bottom: calc(140px + env(safe-area-inset-bottom));
+  transform: translateX(-50%); z-index: 20; max-width: 90vw;
+  font-family: var(--mono); font-size: 11px; color: #ffb4a6;
+  background: rgba(40, 12, 10, 0.92); border: 1px solid rgba(255, 122, 92, 0.4);
+  border-radius: 8px; padding: 8px 12px;
+}
+
 [hidden] { display: none !important; }

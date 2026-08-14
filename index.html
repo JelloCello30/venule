@@ -6,7 +6,7 @@
 <title>venule — see the veins your camera almost sees</title>
 <meta name="description" content="venule turns a plain camera into a vein-contrast instrument. It amplifies the faint hemoglobin signal already in the image — live, in your browser, nothing uploaded.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230c0e10'/%3E%3Cpath d='M16 26V15M16 15c0-5-4-6-6-9M16 15c0-4 4-5 6-8' stroke='%2346e0b4' stroke-width='2.4' stroke-linecap='round' fill='none'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="css/venule.css">
+<link rel="stylesheet" href="css/venule.css?v=3">
 </head>
 <body class="landing">
 
@@ -129,7 +129,7 @@
   <div class="wrap">
     <p class="eyebrow">Privacy</p>
     <h2>There is no server</h2>
-    <p class="intro">venule is a static page. Frames go from your camera to your screen and nowhere else — no analytics, no cookies, no accounts, no “AI cloud.” You can disconnect from the internet after it loads and it keeps working. The source is short enough to read in one sitting, and you’re welcome to.</p>
+    <p class="intro">venule is a static page. Frames go from your camera to your screen and nowhere else — no analytics, no cookies, no accounts. On load it fetches one static file from a public CDN: Google’s skin-segmentation model (a few megabytes of neural-network weights), which then runs entirely on your device. Your video never goes anywhere; if the model can’t load, venule falls back to a built-in color filter and keeps working offline. The source is short enough to read in one sitting, and you’re welcome to.</p>
   </div>
 </section>
 
@@ -158,10 +158,10 @@
       </div>
     </details>
     <details class="faq">
-      <summary>Why doesn’t it use an AI model?</summary>
+      <summary>Where does AI fit in — and where doesn’t it?</summary>
       <div class="a">
-        <p>Because it wouldn’t help where it counts. Large vision models can’t localize a 2-pixel-wide ridge at 30 frames per second, and no model — large or small — can recover signal that never reached the sensor. The bottleneck here is optics, not intelligence.</p>
-        <p>There’s also a quieter reason: streaming video of your body to a third-party API is a real privacy cost, and venule’s whole design is that nothing leaves your device. Classical filters are instant, inspectable, and private. A small on-device segmentation network could sharpen results someday, but it would run here, in your browser, under the same rule: no uploads.</p>
+        <p>venule uses a neural network for the job neural networks are good at: knowing what’s skin. Google’s MediaPipe segmentation model runs on your device and confines the vein overlay to actual skin, across skin tones and lighting that break simple color rules. The vein tracing itself stays a classical ridge filter — it’s instant, inspectable, and localizes 2-pixel structures at video rate, which large cloud models can’t.</p>
+        <p>What AI can’t do is recover signal that never reached the sensor — no model, large or small, can see a vein whose photons were absorbed before the lens. And nothing here streams your body to an API: the model’s weights are downloaded once as a static file; your frames never leave the device.</p>
       </div>
     </details>
     <details class="faq">

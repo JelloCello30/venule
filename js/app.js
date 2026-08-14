@@ -34,6 +34,67 @@
 
   var PROC_WIDTHS = [256, 320, 384, 448, 512];
 
+  /* ---------------- neural skin segmentation ---------------- */
+  // MediaPipe selfie_multiclass gives per-pixel body-skin/face-skin
+  // categories, on-device. Loads in the background; until it's ready (or
+  // if the CDN is unreachable) vision.js falls back to its color mask.
+  var seg = { inst: null, status: 'loading', mask: null, maskW: 0, maskH: 0, busy: false, lastTs: 0 };
+
+  function initSegmenter() {
+    var tries = 0;
+    var timer = setInterval(function () {
+      var mp = window.__venuleSeg;
+      if (mp === undefined && ++tries < 150) return; // module still loading
+      clearInterval(timer);
+      if (!mp) { seg.status = 'unavailable'; return; }
+      mp.FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+      ).then(function (fileset) {
+        return mp.ImageSegmenter.createFromOptions(fileset, {
+          baseOptions: {
+            // CPU delegate on purpose: the GPU delegate scrambles category
+            // ids on iOS Safari (google-ai-edge/mediapipe#6142)
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite'
+          },
+          runningMode: 'VIDEO',
+          outputCategoryMask: true,
+          outputConfidenceMasks: false
+        });
+      }).then(function (inst) {
+        seg.inst = inst;
+        seg.status = 'ready';
+      }).catch(function () {
+        seg.status = 'unavailable';
+      });
+    }, 100);
+  }
+
+  function updateSegMask() {
+    if (!seg.inst || seg.busy) return;
+    seg.busy = true;
+    var ts = Math.max(seg.lastTs + 1, Math.round(performance.now()));
+    seg.lastTs = ts;
+    try {
+      seg.inst.segmentForVideo(app.procCanvas, ts, function (result) {
+        var cm = result.categoryMask;
+        if (cm) {
+          var arr = cm.getAsUint8Array();
+          if (!seg.mask || seg.mask.length !== arr.length) seg.mask = new Uint8Array(arr.length);
+          seg.mask.set(arr);
+          seg.maskW = cm.width;
+          seg.maskH = cm.height;
+        }
+        result.close();
+        seg.busy = false;
+        // stills render on demand: repaint once now that the mask exists
+        if (app.phase === 'photo' || app.frozen) app.needsRender = true;
+      });
+    } catch (e) {
+      seg.status = 'unavailable';
+      seg.busy = false;
+    }
+  }
+
   var app = {
     phase: 'start',          // start | live | photo | error
     mode: 'veins',           // enhance | veins | split
@@ -62,6 +123,9 @@
     bpmShown: 0,
     stillCanvas: document.createElement('canvas'),
     stillCtx: null,
+    segTick: 0,
+    stillSegDone: false,
+    debug: /[?&]debug=1/.test(location.search),
     frameMs: [],
     frameCount: 0,
     fps: 0,
@@ -247,6 +311,7 @@
       app.stillCtx.drawImage(els.video, 0, 0);
     }
     app.frozen = v;
+    if (v) app.stillSegDone = false;
     if (!v) { app.stillCanvas.width = 0; app.stillCanvas.height = 0; }
     els.btnFreeze.textContent = v ? 'Resume' : 'Freeze';
     app.needsRender = true;
@@ -305,6 +370,16 @@
     var img = app.procCtx.getImageData(0, 0, w, h);
 
     var still = app.phase === 'photo' || app.frozen;
+    // refresh the neural mask: every other live frame, once per still
+    if (app.mode !== 'enhance') {
+      if (!still) {
+        if (app.segTick++ % 2 === 0) updateSegMask();
+      } else if (!app.stillSegDone && seg.inst) {
+        app.stillSegDone = true;
+        updateSegMask();
+      }
+    }
+
     // component labeling jitters if refreshed every frame; throttle it live
     var wantLabels = app.mode === 'labels' && (still || app.labelTick++ % 12 === 0);
     var res = V.analyze(img.data, app.bufs, app.state, {
@@ -312,7 +387,10 @@
       strength: parseFloat(els.strength.value),
       sensitivity: parseFloat(els.sensitivity.value),
       still: still,
-      labels: wantLabels
+      labels: wantLabels,
+      catMask: seg.mask,
+      catW: seg.maskW,
+      catH: seg.maskH
     });
     if (wantLabels) app.lastLabels = res.labels;
     app.skinFrac = res.skinFrac;
@@ -414,6 +492,10 @@
         (app.phase === 'live' || app.phase === 'photo')) {
       txt += ' · point at skin';
     }
+    if (app.debug) {
+      txt += ' · ' + (seg.status === 'ready' ? 'ai-mask' : 'color-mask (' + seg.status + ')') +
+        ' · skin ' + Math.round(app.skinFrac * 100) + '%';
+    }
     if (app.mode === 'pulse' && app.phase === 'live') {
       if (app.frozen) {
         txt += ' · pulse paused';
@@ -471,6 +553,7 @@
     createImageBitmap(file).then(function (bmp) {
       stopStream();
       app.photoBitmap = bmp;
+      app.stillSegDone = false;
       setFrozen(false);
       if (app.mode === 'pulse') app.mode = 'veins';
       // stills can afford the top resolution
@@ -605,5 +688,13 @@
     else startLoop();
   });
 
+  // surface hard failures on screen — a silent white/black page is
+  // undebuggable from a phone
+  window.addEventListener('error', function (e) {
+    var t = document.getElementById('errtoast');
+    if (t) { t.textContent = 'error: ' + (e.message || 'unknown'); t.hidden = false; }
+  });
+
+  initSegmenter();
   show('start');
 })();

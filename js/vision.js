@@ -124,12 +124,18 @@
     }
   }
 
-  // Fills bufs.mask; returns hard-coverage fraction (mask > 0.5).
+  // Fills bufs.mask; returns hard-coverage fraction. The mask is the UNION
+  // of two independent detectors, because each fails alone: the YCbCr color
+  // gate breaks under unusual white balance, and MediaPipe's selfie model —
+  // trained on people, not close-ups — often misses a faceless hand or
+  // forearm filling the frame. Either one finding skin is enough; the
+  // luminance gate and flattenNonSkin clean up whatever the union admits.
   // Uses f0/f1 as scratch — call BEFORE vesselness(), which reuses them.
-  function skinMask(rgba, bufs) {
+  function buildSkinMask(rgba, bufs, cat, cw, ch) {
     var w = bufs.w, h = bufs.h, n = w * h, f0 = bufs.f0;
-    var count = 0;
-    for (var i = 0, j = 0; i < n; i++, j += 4) {
+    var i, j, m;
+    // 1) color-space score
+    for (i = 0, j = 0; i < n; i++, j += 4) {
       var r = rgba[j], g = rgba[j + 1], b = rgba[j + 2];
       var y = 0.299 * r + 0.587 * g + 0.114 * b;
       var cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
@@ -137,11 +143,29 @@
       // soft trapezoids around the classic YCbCr skin cluster; the Cr low
       // edge sits above warm-tinted shadows on pale fabric (measured ~135
       // on real photos vs ≥150 for lit skin)
-      var m = trap(cr, 135, 143, 172, 184) * trap(cb, 70, 80, 126, 135);
+      m = trap(cr, 135, 143, 172, 184) * trap(cb, 70, 80, 126, 135);
       if (y < 40) m *= y / 40; // too dark to carry signal either way
       f0[i] = m;
-      if (m > 0.5) count++;
     }
+    // 2) union with the neural body-skin/face-skin categories
+    // (0=background 1=hair 2=body-skin 3=face-skin 4=clothes 5=others)
+    if (cat && cw > 0) {
+      if (cw === w && ch === h) {
+        for (i = 0; i < n; i++) {
+          if ((cat[i] === 2 || cat[i] === 3) && f0[i] < 1) f0[i] = 1;
+        }
+      } else {
+        for (var yy = 0; yy < h; yy++) {
+          var srow = ((yy * ch / h) | 0) * cw, drow = yy * w;
+          for (var x = 0; x < w; x++) {
+            var c = cat[srow + ((x * cw / w) | 0)];
+            if ((c === 2 || c === 3) && f0[drow + x] < 1) f0[drow + x] = 1;
+          }
+        }
+      }
+    }
+    var count = 0;
+    for (i = 0; i < n; i++) { if (f0[i] > 0.5) count++; }
     // shrink so the limb's silhouette edge — itself a strong dark ridge —
     // falls outside the mask (iterations scale with resolution), then
     // soften the boundary
@@ -160,7 +184,7 @@
   // meets the sheet), but they are far darker than lit skin while veins
   // are only a few percent darker. Gate the mask by brightness relative
   // to the skin region's median green level.
-  function luminanceGate(bufs) {
+  function luminanceGate(bufs, loF, hiF) {
     var n = bufs.w * bufs.h, g8 = bufs.g8, mask = bufs.mask;
     var hist = bufs.normHist;
     hist.fill(0);
@@ -173,7 +197,7 @@
     for (i = 0; i < 256; i++) { acc += hist[i]; if (acc >= half) { med = i; break; } }
     // veins sit at ~85-95% of the skin median; rim shading at a limb's
     // silhouette sits well below — gate between them
-    var lo = med * 0.45, hi = med * 0.72;
+    var lo = med * loF, hi = med * hiF;
     var invSpan = 1 / Math.max(hi - lo, 1);
     for (i = 0; i < n; i++) {
       if (mask[i] <= 0) continue;
@@ -551,8 +575,9 @@
       return { labels: null, skinFrac: 1 };
     }
 
-    var skinFrac = skinMask(rgba, bufs); // must run before vesselness (scratch reuse)
-    luminanceGate(bufs);
+    // mask must be built before vesselness (scratch-buffer reuse)
+    var skinFrac = buildSkinMask(rgba, bufs, params.catMask, params.catW || 0, params.catH || 0);
+    luminanceGate(bufs, 0.40, 0.65);
     flattenNonSkin(bufs);
     var wantBright = params.mode === 'structures';
     // physical vein widths are resolution-independent: scale sigmas with w

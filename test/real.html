@@ -18,6 +18,12 @@
 <div id="report">running…</div>
 <div id="grid"></div>
 
+<script type="module">
+try {
+  const m = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs');
+  window.__venuleSeg = { FilesetResolver: m.FilesetResolver, ImageSegmenter: m.ImageSegmenter };
+} catch (e) { window.__venuleSeg = null; }
+</script>
 <script src="../js/vision.js"></script>
 <script>
 (async function () {
@@ -25,6 +31,38 @@
   var V = window.VenuleVision;
   var FILES = ['handvein.jpg', 'armveins.jpg', 'hands.jpg', 'forearm.jpg', 'skin.jpg', 'clutter.jpg'];
   var report = {};
+
+  // try to bring up the neural segmenter (IMAGE mode); fall back silently
+  var segmenter = null;
+  for (var t = 0; t < 80 && window.__venuleSeg === undefined; t++) {
+    await new Promise(function (r) { setTimeout(r, 100); });
+  }
+  if (window.__venuleSeg) {
+    try {
+      var fileset = await window.__venuleSeg.FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+      segmenter = await window.__venuleSeg.ImageSegmenter.createFromOptions(fileset, {
+        baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite' },
+        runningMode: 'IMAGE',
+        outputCategoryMask: true,
+        outputConfidenceMasks: false
+      });
+    } catch (e) { segmenter = null; }
+  }
+
+  function segmentCanvas(canvas) {
+    return new Promise(function (resolve) {
+      if (!segmenter) { resolve(null); return; }
+      try {
+        segmenter.segment(canvas, function (result) {
+          var cm = result.categoryMask;
+          var out = cm ? { data: new Uint8Array(cm.getAsUint8Array()), w: cm.width, h: cm.height } : null;
+          result.close();
+          resolve(out);
+        });
+      } catch (e) { resolve(null); }
+    });
+  }
 
   function loadImg(src) {
     return new Promise(function (res, rej) {
@@ -64,8 +102,10 @@
 
     var bufs = V.makeBuffers(W, H);
     var state = V.makeState();
+    var cat = await segmentCanvas(cIn);
     var res = V.analyze(data.data, bufs, state,
-      { mode: 'veins', strength: 0.6, sensitivity: 0.55, still: true, labels: true });
+      { mode: 'veins', strength: 0.6, sensitivity: 0.55, still: true, labels: true,
+        catMask: cat && cat.data, catW: cat ? cat.w : 0, catH: cat ? cat.h : 0 });
 
     // mask panel
     var cM = panel(row, 'skin mask (' + (res.skinFrac * 100).toFixed(0) + '%)', W, H);
@@ -104,6 +144,7 @@
       if (bufs.mask[q] > 0.5) aN++;
     }
     report[f] = {
+      maskSource: cat ? 'neural' : 'color',
       skin: +(res.skinFrac).toFixed(3),
       litFracOfSkin: aN ? +(aOn / aN).toFixed(4) : 0,
       labels: res.labels ? res.labels.length : 0
