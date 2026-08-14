@@ -57,6 +57,8 @@
     heatCtx: null,
     heatImg: null,
     bpmShown: 0,
+    stillCanvas: document.createElement('canvas'),
+    stillCtx: null,
     frameMs: [],
     frameCount: 0,
     fps: 0,
@@ -68,6 +70,7 @@
   app.procCtx = app.procCanvas.getContext('2d', { willReadFrequently: true });
   app.pulseCtx = app.pulseCanvas.getContext('2d', { willReadFrequently: true });
   app.heatCtx = app.heatCanvas.getContext('2d');
+  app.stillCtx = app.stillCanvas.getContext('2d');
 
   var PULSE_W = 120;
 
@@ -95,10 +98,36 @@
     app.bufs = V.makeBuffers(w, h);
     app.state = V.makeState();
     app.outImage = new ImageData(w, h);
+    // labels are stored in processing-resolution coordinates: stale ones
+    // would draw offset until the recompute throttle ticks over
+    app.lastLabels = null;
+    app.labelTick = 0;
+    layoutView();
   }
 
+  // Display size is decoupled from buffer size: the canvas fills the
+  // viewport (contain-fit) and only sharpness changes when the adaptive
+  // resolution steps — otherwise the image visibly jumps on every step.
+  function layoutView() {
+    if (!app.bufs) return;
+    var vw = window.innerWidth, vh = window.innerHeight;
+    if (!vw || !vh) {
+      // hidden/zero-sized viewport: fall back to the stylesheet's auto sizing
+      els.canvas.style.width = '';
+      els.canvas.style.height = '';
+      return;
+    }
+    var ar = app.bufs.w / app.bufs.h;
+    var w = Math.min(vw, vh * ar);
+    els.canvas.style.width = w + 'px';
+    els.canvas.style.height = (w / ar) + 'px';
+  }
+  window.addEventListener('resize', layoutView);
+
   function sourceAspect() {
-    if (app.phase === 'photo' && app.photoBitmap) {
+    // a pending photoBitmap wins regardless of phase — openPhoto sizes
+    // buffers before the phase flips to 'photo'
+    if (app.photoBitmap) {
       return app.photoBitmap.width / app.photoBitmap.height;
     }
     if (els.video.videoWidth) return els.video.videoWidth / els.video.videoHeight;
@@ -124,6 +153,7 @@
     els.btnFreeze.hidden = phase === 'photo';
     els.btnFlip.hidden = phase !== 'live' || !app.multiCam;
     updateModeUI();
+    layoutView();
   }
 
   function fail(message) {
@@ -163,8 +193,8 @@
       return navigator.mediaDevices.enumerateDevices();
     }).then(function (devices) {
       app.multiCam = devices.filter(function (d) { return d.kind === 'videoinput'; }).length > 1;
-      app.frozen = false;
       app.photoBitmap = null;
+      setFrozen(false);
       syncProcSize();
       show('live');
       startLoop();
@@ -182,10 +212,33 @@
 
   /* ---------------- render loop ---------------- */
 
+  // The still source while frozen; null means live video.
+  function frozenSource() {
+    return (app.frozen && app.stillCanvas.width) ? app.stillCanvas : null;
+  }
+
+  // A frozen frame must be a real snapshot: the <video> keeps playing, so
+  // re-renders (slider tweaks, mode switches) would silently re-sample it.
+  function setFrozen(v) {
+    if (v && app.phase === 'live' && els.video.videoWidth) {
+      app.stillCanvas.width = els.video.videoWidth;
+      app.stillCanvas.height = els.video.videoHeight;
+      app.stillCtx.drawImage(els.video, 0, 0);
+    }
+    app.frozen = v;
+    if (!v) { app.stillCanvas.width = 0; app.stillCanvas.height = 0; }
+    els.btnFreeze.textContent = v ? 'Resume' : 'Freeze';
+    app.needsRender = true;
+    updateReadout();
+  }
+
   function drawSourceToProc() {
     var pc = app.procCanvas, pctx = app.procCtx;
+    var still = frozenSource();
     if (app.phase === 'photo' && app.photoBitmap) {
       pctx.drawImage(app.photoBitmap, 0, 0, pc.width, pc.height);
+    } else if (still) {
+      pctx.drawImage(still, 0, 0, pc.width, pc.height);
     } else {
       pctx.drawImage(els.video, 0, 0, pc.width, pc.height);
     }
@@ -239,7 +292,8 @@
       // original feed left of the divider, processed right
       var cut = Math.round(w * app.split);
       if (cut > 0) {
-        var src = (app.phase === 'photo' && app.photoBitmap) ? app.photoBitmap : els.video;
+        var src = (app.phase === 'photo' && app.photoBitmap) ? app.photoBitmap
+          : (frozenSource() || els.video);
         var sw = src.videoWidth || src.width, sh = src.videoHeight || src.height;
         ctx.drawImage(src, 0, 0, sw * app.split, sh, 0, 0, cut, h);
       }
@@ -307,6 +361,7 @@
   }
 
   function updateReadout() {
+    if (!app.bufs) return; // nothing sized yet (fresh page, pre-camera)
     var txt = app.bufs.w + 'px · ' + app.fps + ' fps' + (app.frozen ? ' · frozen' : '');
     if (app.mode === 'pulse' && app.phase === 'live') {
       if (app.frozen) {
@@ -363,11 +418,16 @@
     createImageBitmap(file).then(function (bmp) {
       stopStream();
       app.photoBitmap = bmp;
-      app.frozen = false;
+      setFrozen(false);
       if (app.mode === 'pulse') app.mode = 'veins';
       // stills can afford the top resolution
       app.procIdx = PROC_WIDTHS.length - 1;
       syncProcSize();
+      // same-size photo swaps skip setProcSize's reset, and the display
+      // normalization must not carry one image's peak into the next
+      app.state = V.makeState();
+      app.lastLabels = null;
+      app.labelTick = 0;
       show('photo');
       // run a few passes so the adaptive normalization settles
       var img; drawSourceToProc();
@@ -416,10 +476,7 @@
   });
 
   els.btnFreeze.addEventListener('click', function () {
-    app.frozen = !app.frozen;
-    app.needsRender = true;
-    els.btnFreeze.textContent = app.frozen ? 'Resume' : 'Freeze';
-    updateReadout();
+    setFrozen(!app.frozen);
   });
 
   els.btnSave.addEventListener('click', function () {

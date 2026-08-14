@@ -122,9 +122,12 @@ footer.site {
 
 body.app {
   background: var(--bg); color: var(--fg);
-  height: 100dvh; overflow: hidden;
+  height: 100vh; height: 100dvh; overflow: hidden;
   display: flex; align-items: center; justify-content: center;
 }
+
+/* invisible but still rendered — see the comment in app.html */
+#cam { position: fixed; top: 0; left: 0; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
 
 .card {
   width: min(420px, calc(100vw - 40px));
@@ -159,7 +162,7 @@ body.app {
 }
 #stage.active { display: flex; }
 #frame { position: relative; }
-#view { max-width: 100vw; max-height: 100dvh; width: auto; height: auto; object-fit: contain; }
+#view { max-width: 100vw; max-height: 100vh; max-height: 100dvh; width: auto; height: auto; object-fit: contain; }
 #labels { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 
 #divider {

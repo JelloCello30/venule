@@ -11,7 +11,9 @@
 </head>
 <body class="app">
 
-<video id="cam" playsinline autoplay muted hidden></video>
+<!-- kept rendered (not display:none): iOS Safari stops delivering frames
+     from a display:none camera video, which would blank the whole stage -->
+<video id="cam" playsinline autoplay muted></video>
 <input id="file-input" type="file" accept="image/*" hidden>
 
 <!-- start -->
