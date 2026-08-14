@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>venule — pipeline test</title>
+<style>
+  body { font-family: ui-monospace, Menlo, monospace; background: #0c0e10; color: #e9ebe7; padding: 24px; }
+  h1 { font-size: 16px; margin-bottom: 12px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
+  figure { margin: 0; }
+  figcaption { font-size: 11px; color: #97a19c; margin-top: 4px; }
+  canvas { border: 1px solid rgba(255,255,255,.15); image-rendering: pixelated; width: 360px; }
+  #summary { font-size: 13px; white-space: pre; background: #15181b; padding: 14px; border-radius: 8px; margin-top: 8px; }
+  .pass { color: #46e0b4; } .fail { color: #ff7a5c; }
+</style>
+</head>
+<body>
+<h1>venule pipeline test — synthetic arm with known vein positions</h1>
+<div id="summary">running…</div>
+<div class="row">
+  <figure><canvas id="c-in"></canvas><figcaption>input (synthetic skin + faint veins)</figcaption></figure>
+  <figure><canvas id="c-eq"></canvas><figcaption>green + CLAHE</figcaption></figure>
+  <figure><canvas id="c-vess"></canvas><figcaption>vesselness (normalized)</figcaption></figure>
+  <figure><canvas id="c-out"></canvas><figcaption>veins composite</figcaption></figure>
+</div>
+
+<script src="../js/vision.js"></script>
+<script>
+(function () {
+  'use strict';
+  var W = 480, H = 360;
+  var V = window.VenuleVision;
+
+  // deterministic LCG so runs are reproducible
+  var seed = 12345;
+  function rnd() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
+
+  function strokeVeins(ctx, style) {
+    // three veins of different widths/faintness at known positions
+    var paths = [
+      { w: 7, a: 0.32, p: [[40, 300], [140, 220], [260, 200], [430, 120]] },
+      { w: 4, a: 0.26, p: [[80, 340], [180, 300], [300, 290], [440, 230]] },
+      { w: 3, a: 0.16, p: [[30, 180], [140, 150], [240, 170], [400, 60]] }
+    ];
+    paths.forEach(function (v) {
+      ctx.beginPath();
+      ctx.moveTo(v.p[0][0], v.p[0][1]);
+      for (var i = 1; i < v.p.length - 1; i++) {
+        var xc = (v.p[i][0] + v.p[i + 1][0]) / 2, yc = (v.p[i][1] + v.p[i + 1][1]) / 2;
+        ctx.quadraticCurveTo(v.p[i][0], v.p[i][1], xc, yc);
+      }
+      ctx.lineTo(v.p[v.p.length - 1][0], v.p[v.p.length - 1][1]);
+      ctx.lineCap = 'round';
+      if (style === 'truth') { ctx.strokeStyle = '#fff'; ctx.lineWidth = v.w; }
+      else if (style === 'exclude') { ctx.strokeStyle = '#fff'; ctx.lineWidth = v.w + 14; }
+      else { ctx.strokeStyle = 'rgba(118,116,138,' + v.a + ')'; ctx.lineWidth = v.w; }
+      ctx.stroke();
+    });
+  }
+
+  function buildInput() {
+    var c = document.getElementById('c-in');
+    c.width = W; c.height = H;
+    var ctx = c.getContext('2d');
+    ctx.fillStyle = 'rgb(206,172,150)';           // skin-ish base
+    ctx.fillRect(0, 0, W, H);
+    for (var i = 0; i < 45; i++) {                 // low-frequency mottling
+      var gx = rnd() * W, gy = rnd() * H, gr = 30 + rnd() * 80;
+      var g = ctx.createRadialGradient(gx, gy, 0, gx, gy, gr);
+      var d = Math.round((rnd() - 0.5) * 22);
+      g.addColorStop(0, 'rgba(' + (206 + d) + ',' + (172 + d) + ',' + (150 + d) + ',0.35)');
+      g.addColorStop(1, 'rgba(' + (206 + d) + ',' + (172 + d) + ',' + (150 + d) + ',0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, W, H);
+    }
+    strokeVeins(ctx, 'veins');
+    var img = ctx.getImageData(0, 0, W, H);        // per-pixel sensor noise
+    for (var j = 0; j < img.data.length; j += 4) {
+      var n = (rnd() - 0.5) * 12;
+      img.data[j] += n; img.data[j + 1] += n; img.data[j + 2] += n;
+    }
+    ctx.putImageData(img, 0, 0);
+    return img;
+  }
+
+  function buildMask(style) {
+    var c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    var ctx = c.getContext('2d');
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+    strokeVeins(ctx, style);
+    var d = ctx.getImageData(0, 0, W, H).data;
+    var m = new Uint8Array(W * H);
+    for (var i = 0; i < W * H; i++) m[i] = d[i * 4] > 128 ? 1 : 0;
+    return m;
+  }
+
+  function grayToCanvas(id, arr, scale) {
+    var c = document.getElementById(id);
+    c.width = W; c.height = H;
+    var ctx = c.getContext('2d');
+    var img = ctx.createImageData(W, H);
+    for (var i = 0, j = 0; i < W * H; i++, j += 4) {
+      var v = Math.max(0, Math.min(255, arr[i] * (scale || 1)));
+      img.data[j] = v; img.data[j + 1] = v; img.data[j + 2] = v; img.data[j + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  var input = buildInput();
+  var truth = buildMask('truth');
+  var exclude = buildMask('exclude');
+
+  var bufs = V.makeBuffers(W, H);
+  var state = V.makeState();
+  var out = new ImageData(W, H);
+  var params = { mode: 'veins', strength: 0.6, sensitivity: 0.55, still: true };
+
+  var t0 = performance.now();
+  V.process(input.data, out.data, bufs, state, params);   // pass 1: settle dispMax
+  V.process(input.data, out.data, bufs, state, params);   // pass 2: measured
+  var ms = (performance.now() - t0) / 2;
+
+  // labels mode: components should land on the drawn veins
+  params.labels = true;
+  var comps = V.process(input.data, out.data, bufs, state, params) || [];
+  params.labels = false;
+
+  // structures mode: must run without errors and produce a bright-ridge map
+  var stateB = V.makeState();
+  var outB = new ImageData(W, H);
+  V.process(input.data, outB.data, bufs, stateB, { mode: 'structures', strength: 0.6, sensitivity: 0.55, still: true });
+  var brightOk = bufs.vessB.some(function (v) { return v > 0; });
+
+  // pulse mode: left half of a synthetic clip oscillates at 1.2 Hz (72 bpm)
+  // under noise; the energy map must localize it and the BPM must be right
+  var PW = 120, PH = 90;
+  var ps = V.makePulseState(PW, PH);
+  var pframe = new Uint8ClampedArray(PW * PH * 4);
+  var half = PW >> 1;
+  for (var f = 0; f < 240; f++) {
+    var tMs = f * (1000 / 30);
+    var beat = Math.sin(2 * Math.PI * 1.2 * (tMs / 1000)) * 1.8;
+    for (var py = 0; py < PH; py++) {
+      for (var px = 0; px < PW; px++) {
+        var gv = 128 + (rnd() - 0.5) * 5 + (px < half ? beat : 0);
+        var jj = (py * PW + px) * 4;
+        pframe[jj] = gv; pframe[jj + 1] = gv; pframe[jj + 2] = gv; pframe[jj + 3] = 255;
+      }
+    }
+    V.pulseUpdate(ps, pframe, tMs);
+  }
+  var eA = 0, eB = 0;
+  for (var pyy = 0; pyy < PH; pyy++) {
+    for (var pxx = 0; pxx < PW; pxx++) {
+      var ee = ps.energy[pyy * PW + pxx];
+      if (pxx < half) eA += ee; else eB += ee;
+    }
+  }
+  var pulseRatio = (eA / (half * PH)) / Math.max(eB / ((PW - half) * PH), 1e-9);
+  var est = V.pulseBpm(ps);
+  var pulseOk = pulseRatio >= 3 && est.conf >= 0.3 && est.bpm >= 60 && est.bpm <= 84;
+
+  grayToCanvas('c-eq', bufs.eq, 1);
+  var invMax = 255 / state.dispMax;
+  grayToCanvas('c-vess', bufs.vess, invMax / 255 * 255);
+  document.getElementById('c-out').width = W;
+  document.getElementById('c-out').height = H;
+  document.getElementById('c-out').getContext('2d').putImageData(out, 0, 0);
+
+  // metrics: normalized vesselness on-vein vs clearly-off-vein
+  var onSum = 0, onN = 0, offSum = 0, offN = 0, eqOn = 0, eqOff = 0;
+  var inv = 1 / state.dispMax;
+  for (var i = 0; i < W * H; i++) {
+    var x = i % W, y = (i / W) | 0;
+    if (x < 8 || y < 8 || x >= W - 8 || y >= H - 8) continue;
+    var v = bufs.vess[i] * inv;
+    if (truth[i]) { onSum += v; onN++; eqOn += bufs.eq[i]; }
+    else if (!exclude[i]) { offSum += v; offN++; eqOff += bufs.eq[i]; }
+  }
+  var onMean = onSum / onN, offMean = offSum / offN, ratio = onMean / Math.max(offMean, 1e-9);
+  var eqDrop = (eqOff / offN) - (eqOn / onN);
+
+  // label precision: centroid must fall near a true vein (dilated mask)
+  var hits = 0;
+  comps.forEach(function (c) {
+    var idx = Math.round(c.y) * W + Math.round(c.x);
+    if (exclude[idx]) hits++;
+  });
+  var precision = comps.length ? hits / comps.length : 0;
+
+  var pass = ratio >= 2.5 && onMean >= 0.10 && eqDrop >= 8 &&
+    comps.length >= 2 && comps.length <= 9 && precision >= 0.6 && brightOk && pulseOk;
+  var lines = [
+    'vesselness on-vein mean : ' + onMean.toFixed(4) + '   (need ≥ 0.10)',
+    'vesselness off-vein mean: ' + offMean.toFixed(4),
+    'on/off ratio            : ' + ratio.toFixed(2) + '     (need ≥ 2.5)',
+    'CLAHE vein darkening    : ' + eqDrop.toFixed(1) + ' gray levels (need ≥ 8)',
+    'labeled components      : ' + comps.length + '        (need 2–9)',
+    'label precision         : ' + (precision * 100).toFixed(0) + '%      (need ≥ 60%)',
+    'bright-ridge map        : ' + (brightOk ? 'produced' : 'EMPTY'),
+    'pulse localization      : ' + pulseRatio.toFixed(1) + 'x       (need ≥ 3x)',
+    'pulse rate estimate     : ' + est.bpm.toFixed(0) + ' bpm, conf ' + est.conf.toFixed(2) + ' (true 72, need 60–84 @ conf ≥ 0.3)',
+    'pipeline time           : ' + ms.toFixed(1) + ' ms @ ' + W + 'x' + H,
+    '',
+    pass ? 'RESULT: PASS' : 'RESULT: FAIL'
+  ];
+  var el = document.getElementById('summary');
+  el.textContent = lines.join('\n');
+  el.className = pass ? 'pass' : 'fail';
+  window.__venuleTest = { onMean: onMean, offMean: offMean, ratio: ratio, eqDrop: eqDrop, labels: comps.length, precision: precision, brightOk: brightOk, pulseRatio: pulseRatio, bpm: est.bpm, bpmConf: est.conf, ms: ms, pass: pass };
+})();
+</script>
+</body>
+</html>

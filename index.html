@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>venule — see the veins your camera almost sees</title>
+<meta name="description" content="venule turns a plain camera into a vein-contrast instrument. It amplifies the faint hemoglobin signal already in the image — live, in your browser, nothing uploaded.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230c0e10'/%3E%3Cpath d='M16 26V15M16 15c0-5-4-6-6-9M16 15c0-4 4-5 6-8' stroke='%2346e0b4' stroke-width='2.4' stroke-linecap='round' fill='none'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/venule.css">
+</head>
+<body class="landing">
+
+<div class="wrap">
+  <header class="site">
+    <a class="brand" href="index.html">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#191c1b"/><path d="M16 26V15M16 15c0-5-4-6-6-9M16 15c0-4 4-5 6-8" stroke="#46e0b4" stroke-width="2.4" stroke-linecap="round" fill="none"/></svg>
+      venule
+    </a>
+    <nav>
+      <a href="#how">How it works</a>
+      <a href="#limits">Limits</a>
+      <a href="#tips">Tips</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+  </header>
+</div>
+
+<div class="wrap">
+  <section class="hero">
+    <p class="eyebrow">Browser vein visualizer · free · no uploads</p>
+    <h1>See the veins your camera almost sees.</h1>
+    <p class="lede">A near-surface vein is a few percent darker in green light than the skin around it — a signal your camera records but your screen never shows. venule amplifies it <strong>live, on your device</strong>. No app store, no account, no video ever leaves your browser.</p>
+    <div class="cta-row">
+      <a class="btn primary" href="app.html">Open venule</a>
+      <a class="btn ghost" href="#limits">What it can’t do</a>
+      <span class="cta-note">works on phone &amp; desktop</span>
+    </div>
+  </section>
+</div>
+
+<section class="band" id="how">
+  <div class="wrap">
+    <p class="eyebrow">The method</p>
+    <h2>Why this works</h2>
+    <p class="intro">No machine learning, no cloud — three well-studied image-processing steps, run 30 times a second on your own hardware.</p>
+    <div class="cols3">
+      <div>
+        <span class="step-n">01</span>
+        <h3>Hemoglobin drinks green light</h3>
+        <p>Blood absorbs most strongly around 540–580&nbsp;nm. In an ordinary photo, a vein a millimeter under the skin shows up as a faint dip in the green channel — real, but far too subtle to notice.</p>
+        <div class="figure" style="margin-top:14px">
+          <svg viewBox="0 0 260 120" role="img" aria-label="Stylized hemoglobin absorption curve, peaking in the green band">
+            <rect x="120" y="8" width="70" height="92" fill="#46e0b4" opacity="0.13"/>
+            <path d="M10 96 C 60 92, 95 80, 118 46 C 128 30, 136 30, 145 44 C 152 55, 158 55, 166 42 C 178 24, 196 60, 250 88" fill="none" stroke="#191c1b" stroke-width="2"/>
+            <line x1="10" y1="104" x2="250" y2="104" stroke="#191c1b" stroke-width="1" opacity="0.35"/>
+            <text x="10" y="117" font-size="9" font-family="ui-monospace,Menlo,monospace" fill="#5d6662">450</text>
+            <text x="142" y="117" font-size="9" font-family="ui-monospace,Menlo,monospace" fill="#5d6662">550 nm</text>
+            <text x="232" y="117" font-size="9" font-family="ui-monospace,Menlo,monospace" fill="#5d6662">650</text>
+          </svg>
+          <p class="cap">Hemoglobin absorption (illustrative). The shaded band is what venule reads.</p>
+        </div>
+      </div>
+      <div>
+        <span class="step-n">02</span>
+        <h3>Local equalization turns it up</h3>
+        <p>CLAHE — contrast-limited adaptive histogram equalization — restretches the tones of each small neighborhood independently, so a 3% dip becomes a visible line without blowing out the rest of the frame.</p>
+      </div>
+      <div>
+        <span class="step-n">03</span>
+        <h3>A ridge filter traces tubes</h3>
+        <p>A Frangi vesselness filter looks at local curvature (the eigenvalues of the image Hessian, at three spatial scales) and responds only to dark, tube-shaped structures — veins, not blotches or shadows’ edges.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band" id="limits">
+  <div class="wrap">
+    <p class="eyebrow">Honesty section</p>
+    <h2>What it does well — and what it won’t</h2>
+    <p class="intro">venule amplifies signal that reaches the sensor. It cannot create signal that physics keeps out of the image. Both halves of that sentence matter.</p>
+    <div class="twocol">
+      <ul>
+        <li><span class="mark-yes">DOES</span><strong>Near-surface veins, live</strong><span>Back of the hand, inner wrist, forearm — the classic visible network, made obvious.</span></li>
+        <li><span class="mark-yes">DOES</span><strong>Run entirely on your device</strong><span>A static page and ~1,000 lines of JavaScript. There is no server to upload to.</span></li>
+        <li><span class="mark-yes">DOES</span><strong>Label what it finds</strong><span><em>Labels</em> mode tags each detected vessel-like structure; <em>Structures</em> mode adds an amber overlay for raised, tendon-like ridges. The names are honest: “vein-like,” not “verified vein.”</span></li>
+        <li><span class="mark-yes">DOES</span><strong>See your pulse</strong><span><em>Pulse</em> mode band-passes every pixel over time, lights up where blood pulses beat by beat, and estimates your heart rate — all from the same camera. Fingertip or palm, bright light, hold still.</span></li>
+        <li><span class="mark-yes">DOES</span><strong>Photos as well as live video</strong><span>Drop in any picture — useful when the camera you have isn’t on the device you’re holding.</span></li>
+        <li><span class="mark-yes">DOES</span><strong>Get sharper with better input</strong><span>Plug in an IR-sensitive camera (a Raspberry Pi NoIR, or any USB camera without an IR-cut filter, plus 850&nbsp;nm illumination) and the same pipeline sees far deeper.</span></li>
+      </ul>
+      <ul>
+        <li><span class="mark-no">WON’T</span><strong>See deep veins</strong><span>Visible light scatters within a millimeter or two of tissue. Deeper vessels simply aren’t in the image.</span></li>
+        <li><span class="mark-no">WON’T</span><strong>Work equally for everyone</strong><span>Melanin absorbs across the visible spectrum, so contrast falls as skin tone deepens. Results also drop with dim light, thick subcutaneous fat, and motion. Clinical devices solve this with near-infrared hardware — not software.</span></li>
+        <li><span class="mark-no">WON’T</span><strong>Guarantee that a highlighted line is a vein</strong><span>The ridge filter responds to tube-shaped darkness: tendons in raking light or a stray hair can trigger it too.</span></li>
+        <li><span class="mark-no">WON’T</span><strong>Replace a clinical instrument</strong><span>Hospitals use dedicated near-infrared vein illuminators. venule is the software half of that idea, without the hardware half.</span></li>
+      </ul>
+    </div>
+    <div class="notice">
+      <strong>venule is not a medical device.</strong> It is an educational visualizer. Do not use it to place needles, draw blood, inject anything, or make any clinical decision. If you need vein access, that is a job for a trained professional with proper equipment.
+    </div>
+  </div>
+</section>
+
+<section class="band" id="tips">
+  <div class="wrap">
+    <p class="eyebrow">Field notes</p>
+    <h2>Getting a good image</h2>
+    <div class="cols3">
+      <div>
+        <span class="step-n">WHERE</span>
+        <h3>Thin skin first</h3>
+        <p>The back of the hand is the easiest target, then the inner wrist and forearm. Letting the hand hang at your side for thirty seconds fills the superficial veins and helps a lot.</p>
+      </div>
+      <div>
+        <span class="step-n">LIGHT</span>
+        <h3>Bright and diffuse</h3>
+        <p>Indirect daylight is ideal. More light also means less sensor noise — in dim rooms the contrast boost amplifies grain along with veins. Avoid glare and hard shadows; both read as false edges.</p>
+      </div>
+      <div>
+        <span class="step-n">HOLD</span>
+        <h3>Steady beats close</h3>
+        <p>Rest the arm on a table and keep the camera 20–30&nbsp;cm away. Use <em>Freeze</em> to study a frame, <em>Split</em> to compare against the raw feed, and <em>Save frame</em> to keep one.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band" id="privacy">
+  <div class="wrap">
+    <p class="eyebrow">Privacy</p>
+    <h2>There is no server</h2>
+    <p class="intro">venule is a static page. Frames go from your camera to your screen and nowhere else — no analytics, no cookies, no accounts, no “AI cloud.” You can disconnect from the internet after it loads and it keeps working. The source is short enough to read in one sitting, and you’re welcome to.</p>
+  </div>
+</section>
+
+<section class="band" id="faq">
+  <div class="wrap">
+    <p class="eyebrow">FAQ</p>
+    <h2>Questions people actually ask</h2>
+    <details class="faq">
+      <summary>Does it work on darker skin?</summary>
+      <div class="a">
+        <p>Less well, and we’d rather say so than pretend otherwise. Melanin absorbs light across the whole visible range, which lowers the vein-to-skin contrast that venule depends on. On deeper skin tones you’ll usually need brighter light and a thin-skinned site like the inner wrist, and sometimes the network just won’t resolve.</p>
+        <p>This is a limitation of visible-light imaging itself — commercial devices address it with near-infrared light, which penetrates skin more uniformly. If you can feed venule an IR-sensitive camera, the gap closes considerably.</p>
+      </div>
+    </details>
+    <details class="faq">
+      <summary>Can it show arteries?</summary>
+      <div class="a">
+        <p>No, and neither can any camera-only tool, whatever it claims. Arteries run deeper than the millimeter or two that visible light penetrates, so their photons simply never reach the sensor — there is nothing in the image to detect. That’s optics, not a missing feature.</p>
+        <p>The closest real technique is remote photoplethysmography, and venule ships it: <em>Pulse</em> mode picks up the tiny periodic color change of pulsing blood, shows <em>where skin pulses</em>, and estimates your heart rate. What it deliberately doesn’t claim is an artery’s outline or depth — that information never reaches the sensor, so any tool drawing “arteries” from a plain camera would be making them up.</p>
+      </div>
+    </details>
+    <details class="faq">
+      <summary>What do hospitals use instead?</summary>
+      <div class="a">
+        <p>Dedicated near-infrared vein illuminators. They shine ~850&nbsp;nm light at the skin — deoxygenated hemoglobin absorbs it, surrounding tissue reflects it — and project or display the resulting map. The physics is the same idea as venule’s green-channel trick, but NIR penetrates several millimeters instead of one, and it doesn’t care about melanin nearly as much. Even those devices are positioning aids, not oracles.</p>
+      </div>
+    </details>
+    <details class="faq">
+      <summary>Why doesn’t it use an AI model?</summary>
+      <div class="a">
+        <p>Because it wouldn’t help where it counts. Large vision models can’t localize a 2-pixel-wide ridge at 30 frames per second, and no model — large or small — can recover signal that never reached the sensor. The bottleneck here is optics, not intelligence.</p>
+        <p>There’s also a quieter reason: streaming video of your body to a third-party API is a real privacy cost, and venule’s whole design is that nothing leaves your device. Classical filters are instant, inspectable, and private. A small on-device segmentation network could sharpen results someday, but it would run here, in your browser, under the same rule: no uploads.</p>
+      </div>
+    </details>
+    <details class="faq">
+      <summary>Is any of my video stored or sent anywhere?</summary>
+      <div class="a"><p>No. There’s no backend, no telemetry, and no storage. The only file venule ever writes is the PNG you explicitly save, and it saves to your own device.</p></div>
+    </details>
+    <details class="faq">
+      <summary>Can I use this to find a vein for an injection?</summary>
+      <div class="a"><p>No. venule is not a medical device, hasn’t been evaluated as one, and a highlighted line is not a verified vessel. Nothing about a consumer camera image tells you depth, valves, or what’s next to the vein. Vein access belongs with trained people and proper equipment.</p></div>
+    </details>
+  </div>
+</section>
+
+<div class="wrap">
+  <footer class="site">
+    <span>venule · MIT license · © 2026 Nolan Woo</span>
+    <span>not a medical device · made with a camera and a histogram</span>
+  </footer>
+</div>
+
+</body>
+</html>

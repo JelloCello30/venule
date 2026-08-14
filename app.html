@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0c0e10">
+<title>venule — live</title>
+<meta name="description" content="Live vein-contrast visualizer. Runs entirely in your browser.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230c0e10'/%3E%3Cpath d='M16 26V15M16 15c0-5-4-6-6-9M16 15c0-4 4-5 6-8' stroke='%2346e0b4' stroke-width='2.4' stroke-linecap='round' fill='none'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/venule.css">
+</head>
+<body class="app">
+
+<video id="cam" playsinline autoplay muted hidden></video>
+<input id="file-input" type="file" accept="image/*" hidden>
+
+<!-- start -->
+<div class="card" id="start-card">
+  <a class="brand" href="index.html" aria-label="venule home">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 26V15M16 15c0-5-4-6-6-9M16 15c0-4 4-5 6-8" stroke="#46e0b4" stroke-width="2.4" stroke-linecap="round" fill="none"/></svg>
+    venule
+  </a>
+  <h1>Point a camera at the back of your hand.</h1>
+  <p>Bright, even light works best — daylight from a window beats a ceiling bulb. Everything is processed on this device; no video leaves it.</p>
+  <div class="btn-row">
+    <button class="btn-dark" id="btn-start">Start camera</button>
+    <button class="btn-outline" id="btn-photo-start">Open a photo instead</button>
+  </div>
+  <p class="fine">venule is an educational visualizer, not a medical device. Don’t use it to guide injections, blood draws, or any clinical decision.</p>
+</div>
+
+<!-- error -->
+<div class="card" id="error-card" hidden>
+  <a class="brand" href="index.html">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 26V15M16 15c0-5-4-6-6-9M16 15c0-4 4-5 6-8" stroke="#46e0b4" stroke-width="2.4" stroke-linecap="round" fill="none"/></svg>
+    venule
+  </a>
+  <h1>No live feed</h1>
+  <p id="error-text"></p>
+  <div class="btn-row">
+    <button class="btn-dark" id="btn-retry">Try the camera again</button>
+    <button class="btn-outline" id="btn-photo-error">Open a photo</button>
+  </div>
+  <p class="fine"><a class="back" href="index.html">&larr; back to the site</a></p>
+</div>
+
+<!-- live / photo -->
+<div id="stage">
+  <div id="frame">
+    <canvas id="view"></canvas>
+    <canvas id="labels"></canvas>
+    <div id="divider" hidden></div>
+  </div>
+</div>
+
+<div id="hud" hidden>
+  <a class="brand" href="index.html">venule</a>
+  <div class="right">
+    <span id="readout">—</span>
+    <button class="chip-btn" id="btn-flip" hidden>Flip</button>
+  </div>
+</div>
+
+<div id="controls" hidden>
+  <span id="legend" hidden><i class="sw sw-teal"></i>vein-like&nbsp;&nbsp;<i class="sw sw-amber"></i>tendon-like ridge</span>
+  <div class="seg" role="tablist" aria-label="View mode">
+    <button data-mode="enhance">Enhance</button>
+    <button data-mode="veins" class="on">Veins</button>
+    <button data-mode="labels">Labels</button>
+    <button data-mode="structures">Structures</button>
+    <button data-mode="pulse">Pulse</button>
+    <button data-mode="split">Split</button>
+  </div>
+  <div class="slider-row">
+    <label for="strength">CONTRAST</label>
+    <input type="range" id="strength" min="0" max="1" step="0.01" value="0.6">
+  </div>
+  <div class="slider-row" id="sens-row">
+    <label for="sensitivity">SENSITIVITY</label>
+    <input type="range" id="sensitivity" min="0" max="1" step="0.01" value="0.55">
+  </div>
+  <div class="action-row">
+    <button id="btn-freeze">Freeze</button>
+    <button id="btn-save">Save frame</button>
+    <button id="btn-photo">Photo</button>
+    <button id="btn-live" hidden>Back to live</button>
+  </div>
+</div>
+
+<script src="js/vision.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
