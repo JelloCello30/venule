@@ -34,65 +34,178 @@
 
   var PROC_WIDTHS = [256, 320, 384, 448, 512];
 
-  /* ---------------- neural skin segmentation ---------------- */
+  /* ---------------- demo feed ---------------- */
+  // A synthetic animated arm streamed through captureStream — the full live
+  // pipeline runs on it exactly as on a camera. It exists for two reasons:
+  // anyone can see the app working without granting camera access, and a
+  // "demo works / camera view doesn't" split isolates environment problems
+  // from code problems.
+  var demo = { canvas: null, ctx: null, raf: 0, t0: 0, noise: null };
+
+  function makeNoiseTiles() {
+    var tiles = [];
+    for (var t = 0; t < 4; t++) {
+      var c = document.createElement('canvas');
+      c.width = 640; c.height = 480;
+      var g = c.getContext('2d');
+      var img = g.createImageData(640, 480);
+      for (var i = 0; i < img.data.length; i += 4) {
+        var v = 118 + Math.random() * 20;
+        img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v;
+        img.data[i + 3] = 26; // faint — reads as sensor grain
+      }
+      g.putImageData(img, 0, 0);
+      tiles.push(c);
+    }
+    return tiles;
+  }
+
+  function drawDemoVeins(g) {
+    var veins = [
+      { w: 11, a: 0.26, p: [[-70, 250], [-45, 90], [-15, -90], [25, -260]] },
+      { w: 7, a: 0.22, p: [[30, 260], [45, 80], [25, -80], [-5, -240]] },
+      { w: 5, a: 0.17, p: [[-45, 90], [15, 20], [55, -60]] },
+      { w: 4, a: 0.15, p: [[25, -80], [70, -140], [85, -210]] }
+    ];
+    g.lineCap = 'round';
+    for (var i = 0; i < veins.length; i++) {
+      var v = veins[i];
+      g.beginPath();
+      g.moveTo(v.p[0][0], v.p[0][1]);
+      for (var k = 1; k < v.p.length - 1; k++) {
+        var xc = (v.p[k][0] + v.p[k + 1][0]) / 2, yc = (v.p[k][1] + v.p[k + 1][1]) / 2;
+        g.quadraticCurveTo(v.p[k][0], v.p[k][1], xc, yc);
+      }
+      g.lineTo(v.p[v.p.length - 1][0], v.p[v.p.length - 1][1]);
+      g.strokeStyle = 'rgba(126,120,142,' + v.a + ')';
+      g.lineWidth = v.w;
+      g.stroke();
+    }
+  }
+
+  function startDemoStream() {
+    if (!demo.canvas) {
+      demo.canvas = document.createElement('canvas');
+      demo.canvas.width = 640;
+      demo.canvas.height = 480;
+      demo.ctx = demo.canvas.getContext('2d');
+      demo.noise = makeNoiseTiles();
+    }
+    demo.t0 = performance.now();
+    var frame = 0;
+    function draw() {
+      var g = demo.ctx;
+      var t = (performance.now() - demo.t0) / 1000;
+      // handheld shake, auto-exposure breathing, and a 69 bpm pulse
+      var dx = Math.sin(t * 0.9) * 6 + Math.sin(t * 2.3) * 2.5;
+      var dy = Math.cos(t * 1.1) * 5 + Math.sin(t * 1.7) * 2;
+      var expo = 1 + 0.045 * Math.sin(t * 0.5);
+      var pulse = 1 + 0.012 * Math.sin(t * 2 * Math.PI * 1.15);
+      g.fillStyle = 'rgb(72,70,66)';
+      g.fillRect(0, 0, 640, 480);
+      g.save();
+      g.translate(320 + dx, 240 + dy);
+      g.rotate(0.10);
+      var sr = Math.min(255, 214 * expo * pulse) | 0;
+      var sg2 = Math.min(255, 176 * expo * pulse) | 0;
+      var sb = Math.min(255, 150 * expo) | 0;
+      g.fillStyle = 'rgb(' + sr + ',' + sg2 + ',' + sb + ')';
+      g.beginPath();
+      g.ellipse(0, 0, 150, 300, 0, 0, Math.PI * 2);
+      g.fill();
+      // soft shading so it reads as a limb, not a flat shape
+      var grad = g.createLinearGradient(-150, 0, 150, 0);
+      grad.addColorStop(0, 'rgba(60,40,30,0.18)');
+      grad.addColorStop(0.35, 'rgba(0,0,0,0)');
+      grad.addColorStop(0.8, 'rgba(255,240,220,0.10)');
+      g.fillStyle = grad;
+      g.beginPath();
+      g.ellipse(0, 0, 150, 300, 0, 0, Math.PI * 2);
+      g.fill();
+      g.save();
+      g.beginPath();
+      g.ellipse(0, 0, 140, 290, 0, 0, Math.PI * 2);
+      g.clip();
+      drawDemoVeins(g);
+      g.restore();
+      g.restore();
+      g.drawImage(demo.noise[frame & 3], 0, 0);
+      frame++;
+      demo.raf = requestAnimationFrame(draw);
+    }
+    draw();
+    return demo.canvas.captureStream ? demo.canvas.captureStream(30) : null;
+  }
+
+  /* ---------------- neural skin segmentation (worker) ---------------- */
   // MediaPipe selfie_multiclass gives per-pixel body-skin/face-skin
-  // categories, on-device. Loads in the background; until it's ready (or
-  // if the CDN is unreachable) vision.js falls back to its color mask.
-  var seg = { inst: null, status: 'loading', mask: null, maskW: 0, maskH: 0, busy: false, lastTs: 0 };
+  // categories, on-device. Inference is synchronous WASM, so it lives in a
+  // module worker — on a phone CPU it would otherwise freeze the main
+  // thread for 50-150 ms per call. Until the worker is ready (or if it
+  // can't start), vision.js falls back to its color mask.
+  var seg = { worker: null, status: 'loading', mask: null, maskW: 0, maskH: 0, busy: false, busySince: 0 };
 
   function initSegmenter() {
-    var tries = 0;
-    var timer = setInterval(function () {
-      var mp = window.__venuleSeg;
-      if (mp === undefined && ++tries < 150) return; // module still loading
-      clearInterval(timer);
-      if (!mp) { seg.status = 'unavailable'; return; }
-      mp.FilesetResolver.forVisionTasks(
-        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
-      ).then(function (fileset) {
-        return mp.ImageSegmenter.createFromOptions(fileset, {
-          baseOptions: {
-            // CPU delegate on purpose: the GPU delegate scrambles category
-            // ids on iOS Safari (google-ai-edge/mediapipe#6142)
-            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite'
-          },
-          runningMode: 'VIDEO',
-          outputCategoryMask: true,
-          outputConfidenceMasks: false
-        });
-      }).then(function (inst) {
-        seg.inst = inst;
-        seg.status = 'ready';
-      }).catch(function () {
+    if (typeof Worker === 'undefined' || typeof createImageBitmap === 'undefined') {
+      seg.status = 'unavailable';
+      return;
+    }
+    try {
+      // classic worker, NOT {type:'module'}: MediaPipe's WASM loader calls
+      // importScripts(), which module workers prohibit; the worker itself
+      // pulls the ESM API in via dynamic import(), legal in classic workers
+      seg.worker = new Worker('js/segworker.js?v=6');
+    } catch (e) {
+      seg.status = 'unavailable';
+      return;
+    }
+    seg.worker.onmessage = function (ev) {
+      var d = ev.data || {};
+      if (d.type === 'ready') { seg.status = 'ready'; return; }
+      if (d.type === 'fail') {
         seg.status = 'unavailable';
-      });
-    }, 100);
+        try { seg.worker.terminate(); } catch (e) { /* already dead */ }
+        seg.worker = null;
+        return;
+      }
+      if (d.type === 'mask') {
+        seg.busy = false;
+        if (d.mask) {
+          seg.mask = d.mask;
+          seg.maskW = d.w;
+          seg.maskH = d.h;
+          // stills render on demand: repaint once now that the mask exists
+          if (app.phase === 'photo' || app.frozen) app.needsRender = true;
+        }
+      }
+    };
+    seg.worker.onerror = function () {
+      seg.status = 'unavailable';
+      seg.busy = false;
+      seg.worker = null;
+    };
   }
 
   function updateSegMask() {
-    if (!seg.inst || seg.busy) return;
-    seg.busy = true;
-    var ts = Math.max(seg.lastTs + 1, Math.round(performance.now()));
-    seg.lastTs = ts;
-    try {
-      seg.inst.segmentForVideo(app.procCanvas, ts, function (result) {
-        var cm = result.categoryMask;
-        if (cm) {
-          var arr = cm.getAsUint8Array();
-          if (!seg.mask || seg.mask.length !== arr.length) seg.mask = new Uint8Array(arr.length);
-          seg.mask.set(arr);
-          seg.maskW = cm.width;
-          seg.maskH = cm.height;
-        }
-        result.close();
-        seg.busy = false;
-        // stills render on demand: repaint once now that the mask exists
-        if (app.phase === 'photo' || app.frozen) app.needsRender = true;
-      });
-    } catch (e) {
-      seg.status = 'unavailable';
-      seg.busy = false;
+    if (seg.status !== 'ready' || !seg.worker) return;
+    if (seg.busy) {
+      // self-heal a wedged round-trip (worker killed mid-inference etc.)
+      if (performance.now() - seg.busySince > 4000) seg.busy = false;
+      return;
     }
+    seg.busy = true;
+    seg.busySince = performance.now();
+    createImageBitmap(app.procCanvas).then(function (bmp) {
+      try {
+        seg.worker.postMessage({ bitmap: bmp }, [bmp]);
+      } catch (e) {
+        if (bmp.close) bmp.close();
+        seg.busy = false;
+        seg.status = 'unavailable';
+      }
+    }).catch(function () {
+      seg.busy = false;
+    });
   }
 
   var app = {
@@ -130,6 +243,7 @@
     blackTick: 0,
     blackCount: 0,
     debug: /[?&]debug=1/.test(location.search),
+    demo: /[?&]demo=1/.test(location.search),
     frameMs: [],
     frameCount: 0,
     fps: 0,
@@ -240,6 +354,7 @@
     els.btnLive.hidden = phase !== 'photo';
     els.btnFreeze.hidden = phase === 'photo';
     els.btnFlip.hidden = phase !== 'live' || !app.multiCam;
+    document.getElementById('btn-realcam').hidden = !(app.demo && phase === 'live');
     updateModeUI();
     layoutView();
   }
@@ -253,6 +368,7 @@
   /* ---------------- camera ---------------- */
 
   function stopStream() {
+    if (demo.raf) { cancelAnimationFrame(demo.raf); demo.raf = 0; }
     if (app.stream) {
       app.stream.getTracks().forEach(function (t) { t.stop(); });
       app.stream = null;
@@ -260,6 +376,26 @@
   }
 
   function startCamera() {
+    if (app.demo) {
+      stopStream();
+      var ds = startDemoStream();
+      if (!ds) { fail('This browser cannot run the demo stream. You can open a photo instead.'); return; }
+      app.stream = ds;
+      els.video.srcObject = ds;
+      els.video.play().then(function () {
+        app.multiCam = false;
+        app.photoBitmap = null;
+        setFrozen(false);
+        setupTorch();
+        syncProcSize();
+        show('live');
+        startLoop();
+        showHint('synthetic demo arm — every mode works here');
+      }).catch(function () {
+        fail('The demo stream could not start. You can open a photo instead.');
+      });
+      return;
+    }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       fail('This browser does not support camera capture. You can still open a photo below.');
       return;
@@ -394,7 +530,9 @@
     // is otherwise indistinguishable from "app is broken"
     if (app.phase === 'live' && ++app.blackTick % 60 === 0) {
       var lum = 0, npx = 0;
-      for (var bi = 1; bi < img.data.length; bi += 163 * 4 + 1) { lum += img.data[bi]; npx++; }
+      // stride must be a multiple of 4 so every sample stays on the green
+      // channel (an off-stride walk hits alpha=255 and can never read black)
+      for (var bi = 1; bi < img.data.length; bi += 640) { lum += img.data[bi]; npx++; }
       if (lum / npx < 4) {
         if (++app.blackCount >= 2) showToast('camera is delivering black frames — reload the page, or try another browser');
       } else {
@@ -683,6 +821,15 @@
 
   document.getElementById('btn-start').addEventListener('click', startCamera);
   document.getElementById('btn-retry').addEventListener('click', startCamera);
+  document.getElementById('btn-demo').addEventListener('click', function () {
+    app.demo = true;
+    startCamera();
+  });
+  document.getElementById('btn-realcam').addEventListener('click', function () {
+    app.demo = false;
+    startCamera();
+  });
+  if (app.demo) document.getElementById('btn-start').textContent = 'Start the demo';
 
   /* split divider drag */
   function setSplit(clientX) {

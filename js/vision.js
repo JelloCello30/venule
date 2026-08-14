@@ -602,7 +602,19 @@
     var w = bufs.w, h = bufs.h, n = w * h;
     var aR = bufs.avgR, aG = bufs.avgG, aB = bufs.avgB, g8 = bufs.g8;
     var i, j, x, y;
-    if (still || !state.stacked) {
+    if (still) {
+      // a frozen frame KEEPS the stack it accumulated live — re-copying
+      // would throw away exactly the noise reduction the user froze to study
+      if (!state.stacked) {
+        for (i = 0, j = 0; i < n; i++, j += 4) {
+          aR[i] = rgba[j]; aG[i] = rgba[j + 1]; aB[i] = rgba[j + 2];
+        }
+        state.stacked = true;
+      }
+      state.motion = 0;
+      return;
+    }
+    if (!state.stacked) {
       for (i = 0, j = 0; i < n; i++, j += 4) {
         aR[i] = rgba[j]; aG[i] = rgba[j + 1]; aB[i] = rgba[j + 2];
       }

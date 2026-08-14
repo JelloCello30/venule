@@ -7,18 +7,7 @@
 <title>venule — live</title>
 <meta name="description" content="Live vein-contrast visualizer. Runs entirely in your browser.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230c0e10'/%3E%3Cpath d='M16 26V15M16 15c0-5-4-6-6-9M16 15c0-4 4-5 6-8' stroke='%2346e0b4' stroke-width='2.4' stroke-linecap='round' fill='none'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="css/venule.css?v=5">
-<script type="module">
-// Neural skin segmentation (MediaPipe, runs on-device). Loads in the
-// background; app.js polls window.__venuleSeg and falls back to a
-// color-space mask if this never arrives (offline, blocked CDN, old browser).
-try {
-  const m = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs');
-  window.__venuleSeg = { FilesetResolver: m.FilesetResolver, ImageSegmenter: m.ImageSegmenter };
-} catch (e) {
-  window.__venuleSeg = null;
-}
-</script>
+<link rel="stylesheet" href="css/venule.css?v=6">
 </head>
 <body class="app">
 
@@ -38,6 +27,7 @@ try {
   <div class="btn-row">
     <button class="btn-dark" id="btn-start">Start camera</button>
     <button class="btn-outline" id="btn-photo-start">Open a photo instead</button>
+    <button class="btn-outline" id="btn-demo">Watch the demo (no camera)</button>
   </div>
   <p class="fine">venule is an educational visualizer, not a medical device. Don’t use it to guide injections, blood draws, or any clinical decision.</p>
 </div>
@@ -71,6 +61,7 @@ try {
   <div class="right">
     <span id="readout">—</span>
     <button class="chip-btn" id="btn-torch" hidden>Light</button>
+    <button class="chip-btn" id="btn-realcam" hidden>Use camera</button>
     <button class="chip-btn" id="btn-flip" hidden>Flip</button>
   </div>
 </div>
@@ -104,7 +95,7 @@ try {
 <div id="errtoast" hidden></div>
 <div id="hint" hidden></div>
 
-<script src="js/vision.js?v=5"></script>
-<script src="js/app.js?v=5"></script>
+<script src="js/vision.js?v=6"></script>
+<script src="js/app.js?v=6"></script>
 </body>
 </html>
