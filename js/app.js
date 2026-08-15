@@ -10,8 +10,6 @@
     errorText: document.getElementById('error-text'),
     stage: document.getElementById('stage'),
     canvas: document.getElementById('view'),
-    labels: document.getElementById('labels'),
-    legend: document.getElementById('legend'),
     video: document.getElementById('cam'),
     hud: document.getElementById('hud'),
     readout: document.getElementById('readout'),
@@ -19,7 +17,6 @@
     modeBtns: Array.prototype.slice.call(document.querySelectorAll('[data-mode]')),
     strength: document.getElementById('strength'),
     sensitivity: document.getElementById('sensitivity'),
-    sensRow: document.getElementById('sens-row'),
     btnFreeze: document.getElementById('btn-freeze'),
     btnSave: document.getElementById('btn-save'),
     btnPhoto: document.getElementById('btn-photo'),
@@ -30,7 +27,6 @@
   };
 
   var ctx = els.canvas.getContext('2d', { willReadFrequently: false });
-  var ctxL = els.labels.getContext('2d');
 
   var PROC_WIDTHS = [256, 320, 384, 448, 512];
 
@@ -154,7 +150,7 @@
       // classic worker, NOT {type:'module'}: MediaPipe's WASM loader calls
       // importScripts(), which module workers prohibit; the worker itself
       // pulls the ESM API in via dynamic import(), legal in classic workers
-      seg.worker = new Worker('js/segworker.js?v=7');
+      seg.worker = new Worker('js/segworker.js?v=9');
     } catch (e) {
       seg.status = 'unavailable';
       return;
@@ -225,15 +221,11 @@
     skinFrac: 1,
     photoBitmap: null,
     split: 0.5,
-    lastLabels: null,
-    labelTick: 0,
     pulseState: null,
     pulseCanvas: document.createElement('canvas'),
     pulseCtx: null,
-    heatCanvas: document.createElement('canvas'),
-    heatCtx: null,
-    heatImg: null,
     bpmShown: 0,
+    ppgHold: 0,
     stillCanvas: document.createElement('canvas'),
     stillCtx: null,
     segTick: 0,
@@ -255,23 +247,19 @@
   app.procCtx = app.procCanvas.getContext('2d', { willReadFrequently: true });
   app.outCtx = app.outCanvas.getContext('2d');
   app.pulseCtx = app.pulseCanvas.getContext('2d', { willReadFrequently: true });
-  app.heatCtx = app.heatCanvas.getContext('2d');
   app.stillCtx = app.stillCanvas.getContext('2d');
 
-  var PULSE_W = 120;
+  // Contact PPG samples a tiny frame: a covered lens is spatially uniform,
+  // so resolution buys nothing and costs frame rate.
+  var PULSE_W = 64;
 
   function syncPulseSize() {
     var ph = Math.max(16, Math.round(PULSE_W / sourceAspect() / 2) * 2);
     if (app.pulseCanvas.width === PULSE_W && app.pulseCanvas.height === ph && app.pulseState) return;
     app.pulseCanvas.width = PULSE_W;
     app.pulseCanvas.height = ph;
-    app.heatCanvas.width = PULSE_W;
-    app.heatCanvas.height = ph;
-    app.pulseState = V.makePulseState(PULSE_W, ph);
-    app.heatImg = new ImageData(PULSE_W, ph);
+    app.pulseState = V.makePulseState();
   }
-
-  /* ---------------- sizing ---------------- */
 
   function setProcSize(w, h) {
     // keep dimensions even and sane
@@ -284,10 +272,6 @@
     app.bufs = V.makeBuffers(w, h);
     app.state = V.makeState();
     app.outImage = new ImageData(w, h);
-    // labels are stored in processing-resolution coordinates: stale ones
-    // would draw offset until the recompute throttle ticks over
-    app.lastLabels = null;
-    app.labelTick = 0;
   }
 
   // The display canvas holds the source at (capped) native resolution —
@@ -350,6 +334,8 @@
     els.errorCard.hidden = phase !== 'error';
     els.stage.classList.toggle('active', phase === 'live' || phase === 'photo');
     els.controls.hidden = !(phase === 'live' || phase === 'photo');
+    var pe0 = document.getElementById('ppg');
+    if (pe0) pe0.hidden = !(app.mode === 'pulse' && phase === 'live');
     els.hud.hidden = !(phase === 'live' || phase === 'photo');
     els.btnLive.hidden = phase !== 'photo';
     els.btnFreeze.hidden = phase === 'photo';
@@ -473,17 +459,58 @@
   }
 
 
-  function renderPulseOverlay() {
+  var ppgEl = document.getElementById('ppg');
+  var ppgBpm = document.getElementById('ppg-bpm');
+  var ppgNote = document.getElementById('ppg-note');
+  var ppgWave = document.getElementById('ppg-wave');
+  var ppgCtx = ppgWave.getContext('2d');
+
+  // Fingertip contact PPG. Sampling is trivial; the whole job is coaching
+  // the user into the one posture that makes the measurement reliable.
+  function runPulse() {
     syncPulseSize();
-    app.pulseCtx.drawImage(els.video, 0, 0, app.pulseCanvas.width, app.pulseCanvas.height);
-    var frame = app.pulseCtx.getImageData(0, 0, app.pulseCanvas.width, app.pulseCanvas.height);
-    V.pulseUpdate(app.pulseState, frame.data, performance.now());
-    // sensitivity slider doubles as overlay gain here
-    var gain = 0.6 + parseFloat(els.sensitivity.value) * 2.4;
-    V.pulseCompose(app.pulseState, app.heatImg.data, gain);
-    app.heatCtx.putImageData(app.heatImg, 0, 0);
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(app.heatCanvas, 0, 0, els.canvas.width, els.canvas.height);
+    var pc = app.pulseCanvas;
+    app.pulseCtx.drawImage(els.video, 0, 0, pc.width, pc.height);
+    var frame = app.pulseCtx.getImageData(0, 0, pc.width, pc.height);
+    var s = V.pulseSample(app.pulseState, frame.data, pc.width * pc.height, performance.now());
+    var est = V.pulseBpm(app.pulseState);
+
+    if (!s.covered) {
+      app.bpmShown = 0;
+      ppgBpm.textContent = '—';
+      ppgNote.textContent = torchOn
+        ? 'Cover the lens completely with a fingertip. Press gently and hold still.'
+        : 'Cover the lens with a fingertip. Turn on Light if your phone offers it.';
+    } else if (est.conf >= 0.45 && est.bpm >= 40 && est.bpm <= 180) {
+      app.bpmShown = app.bpmShown ? app.bpmShown * 0.82 + est.bpm * 0.18 : est.bpm;
+      ppgBpm.innerHTML = Math.round(app.bpmShown) + '<span>BPM</span>';
+      ppgNote.textContent = 'Keep holding — the trace below is your pulse.';
+    } else {
+      ppgBpm.textContent = '· · ·';
+      ppgNote.textContent = 'Reading… hold still for ' +
+        Math.max(1, Math.ceil(4 - est.secs)) + ' more second' +
+        (Math.ceil(4 - est.secs) === 1 ? '' : 's');
+    }
+
+    // waveform
+    var wv = V.pulseWave(app.pulseState, 260);
+    var W = ppgWave.width, H = ppgWave.height;
+    ppgCtx.clearRect(0, 0, W, H);
+    ppgCtx.strokeStyle = 'rgba(255,255,255,0.10)';
+    ppgCtx.lineWidth = 1;
+    ppgCtx.beginPath(); ppgCtx.moveTo(0, H / 2); ppgCtx.lineTo(W, H / 2); ppgCtx.stroke();
+    if (wv.length > 3) {
+      ppgCtx.strokeStyle = '#46e0b4';
+      ppgCtx.lineWidth = 2.5;
+      ppgCtx.lineJoin = 'round';
+      ppgCtx.beginPath();
+      for (var i = 0; i < wv.length; i++) {
+        var x = i / (wv.length - 1) * W;
+        var y = H / 2 - wv[i] * (H * 0.42);
+        if (i === 0) ppgCtx.moveTo(x, y); else ppgCtx.lineTo(x, y);
+      }
+      ppgCtx.stroke();
+    }
   }
 
   function renderFrame() {
@@ -495,11 +522,10 @@
       : (frozenSource() || els.video);
 
     if (app.mode === 'pulse') {
-      // pulse needs no vesselness analysis: crisp video + heat overlay
+      // no imaging pipeline at all: the lens is covered by a fingertip
       ctx.drawImage(src, 0, 0, dw, dh);
-      if (app.phase === 'live' && !app.frozen) renderPulseOverlay();
+      if (app.phase === 'live' && !app.frozen) runPulse();
       els.divider.hidden = true;
-      drawLabels();
       return performance.now() - t0;
     }
 
@@ -507,29 +533,26 @@
       // press-and-hold raw peek: just the source, nothing drawn over it
       ctx.drawImage(src, 0, 0, dw, dh);
       els.divider.hidden = true;
-      ctxL.setTransform(1, 0, 0, 1, 0, 0);
-      ctxL.clearRect(0, 0, els.labels.width, els.labels.height);
       return performance.now() - t0;
     }
 
     drawSourceToProc();
     var img = app.procCtx.getImageData(0, 0, w, h);
-
     var still = app.phase === 'photo' || app.frozen;
-    // refresh the neural mask: every other live frame, once per still
+
+    // refresh the neural skin mask: every other live frame, once per still
     if (!still) {
       if (app.segTick++ % 2 === 0) updateSegMask();
-    } else if (!app.stillSegDone && seg.inst) {
+    } else if (!app.stillSegDone) {
       app.stillSegDone = true;
       updateSegMask();
     }
 
     // black-frame watchdog: a live feed that renders but delivers no light
-    // is otherwise indistinguishable from "app is broken"
+    // is otherwise indistinguishable from "app is broken". Stride is a
+    // multiple of 4 so samples stay on the green channel.
     if (app.phase === 'live' && ++app.blackTick % 60 === 0) {
       var lum = 0, npx = 0;
-      // stride must be a multiple of 4 so every sample stays on the green
-      // channel (an off-stride walk hits alpha=255 and can never read black)
       for (var bi = 1; bi < img.data.length; bi += 640) { lum += img.data[bi]; npx++; }
       if (lum / npx < 4) {
         if (++app.blackCount >= 2) showToast('camera is delivering black frames — reload the page, or try another browser');
@@ -538,110 +561,37 @@
       }
     }
 
-    if (app.mode === 'reveal' || app.mode === 'split') {
-      // computational-photography path: temporal stack + in-place
-      // amplification, composited as a hard-light detail layer over the
-      // crisp base (128 = neutral, so non-skin is untouched)
-      var resR = V.analyzeReveal(img.data, app.outImage.data, app.bufs, app.state, {
-        strength: parseFloat(els.strength.value),
-        still: still,
-        catMask: seg.mask,
-        catW: seg.maskW,
-        catH: seg.maskH
-      });
-      app.skinFrac = resR.skinFrac;
-      app.motion = resR.motion;
-      app.outCtx.putImageData(app.outImage, 0, 0);
-      ctx.drawImage(src, 0, 0, dw, dh);
-      ctx.imageSmoothingEnabled = true;
-      ctx.globalCompositeOperation = 'hard-light';
-      if (app.mode === 'split') {
-        var cut = Math.round(dw * app.split);
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(cut, 0, dw - cut, dh);
-        ctx.clip();
-        ctx.drawImage(app.outCanvas, 0, 0, dw, dh);
-        ctx.restore();
-      } else {
-        ctx.drawImage(app.outCanvas, 0, 0, dw, dh);
-      }
-      ctx.globalCompositeOperation = 'source-over';
-    } else {
-      // detection path: Trace (overlay + numbered tags in one view)
-      var wantLabels = still || app.labelTick++ % 12 === 0;
-      var res = V.analyze(img.data, app.bufs, app.state, {
-        mode: 'trace',
-        strength: parseFloat(els.strength.value),
-        sensitivity: parseFloat(els.sensitivity.value),
-        still: still,
-        labels: wantLabels,
-        catMask: seg.mask,
-        catW: seg.maskW,
-        catH: seg.maskH
-      });
-      if (wantLabels) app.lastLabels = res.labels;
-      app.skinFrac = res.skinFrac;
+    var res = V.analyzeReveal(img.data, app.outImage.data, app.bufs, app.state, {
+      strength: parseFloat(els.strength.value),
+      still: still,
+      catMask: seg.mask,
+      catW: seg.maskW,
+      catH: seg.maskH
+    });
+    app.skinFrac = res.skinFrac;
+    app.motion = res.motion;
 
-      ctx.drawImage(src, 0, 0, dw, dh);
-      V.renderOverlay(app.bufs, app.outImage.data);
-      app.outCtx.putImageData(app.outImage, 0, 0);
-      ctx.imageSmoothingEnabled = true;
-      ctx.fillStyle = 'rgba(6,8,10,0.16)';
-      ctx.fillRect(0, 0, dw, dh);
+    app.outCtx.putImageData(app.outImage, 0, 0);
+    ctx.drawImage(src, 0, 0, dw, dh);
+    ctx.imageSmoothingEnabled = true;
+    // hard-light: 128 is neutral, so anything outside the skin mask passes
+    // through the crisp video untouched
+    ctx.globalCompositeOperation = 'hard-light';
+    if (app.mode === 'split') {
+      var cut = Math.round(dw * app.split);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(cut, 0, dw - cut, dh);
+      ctx.clip();
+      ctx.drawImage(app.outCanvas, 0, 0, dw, dh);
+      ctx.restore();
+    } else {
       ctx.drawImage(app.outCanvas, 0, 0, dw, dh);
     }
+    ctx.globalCompositeOperation = 'source-over';
     els.divider.hidden = app.mode !== 'split';
-    drawLabels();
 
     return performance.now() - t0;
-  }
-
-  // roundRect is missing on older Safari
-  function pillPath(c, x, y, w, h, r) {
-    if (c.roundRect) { c.roundRect(x, y, w, h, r); return; }
-    c.moveTo(x + r, y);
-    c.arcTo(x + w, y, x + w, y + h, r);
-    c.arcTo(x + w, y + h, x, y + h, r);
-    c.arcTo(x, y + h, x, y, r);
-    c.arcTo(x, y, x + w, y, r);
-    c.closePath();
-  }
-
-  function drawLabels() {
-    var cw = els.canvas.clientWidth, ch = els.canvas.clientHeight;
-    if (!cw) return;
-    var dpr = window.devicePixelRatio || 1;
-    var pw = Math.round(cw * dpr), ph = Math.round(ch * dpr);
-    if (els.labels.width !== pw || els.labels.height !== ph) {
-      els.labels.width = pw; els.labels.height = ph;
-    }
-    ctxL.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctxL.clearRect(0, 0, cw, ch);
-    if (app.mode !== 'trace' || !app.lastLabels) return;
-
-    var sx = cw / app.bufs.w, sy = ch / app.bufs.h;
-    ctxL.font = '600 11px ui-monospace, Menlo, monospace';
-    ctxL.textBaseline = 'middle';
-    for (var i = 0; i < app.lastLabels.length; i++) {
-      var c = app.lastLabels[i];
-      var x = c.x * sx, y = c.y * sy;
-      var tag = 'V' + (i + 1);
-      var tw = ctxL.measureText(tag).width;
-      ctxL.fillStyle = '#46e0b4';
-      ctxL.beginPath(); ctxL.arc(x, y, 3, 0, Math.PI * 2); ctxL.fill();
-      ctxL.strokeStyle = 'rgba(70,224,180,0.6)'; ctxL.lineWidth = 1;
-      ctxL.beginPath(); ctxL.moveTo(x + 3, y - 3); ctxL.lineTo(x + 12, y - 12); ctxL.stroke();
-      ctxL.fillStyle = 'rgba(12,14,16,0.82)';
-      ctxL.beginPath();
-      var bx = x + 12, by = y - 22;
-      pillPath(ctxL, bx, by, tw + 12, 19, 6);
-      ctxL.fill();
-      ctxL.strokeStyle = 'rgba(255,255,255,0.18)';
-      ctxL.stroke();
-      ctxL.fillStyle = '#e9ebe7';
-      ctxL.fillText(tag, bx + 6, by + 10);
-    }
   }
 
   function adaptResolution(ms) {
@@ -660,7 +610,7 @@
         (app.phase === 'live' || app.phase === 'photo')) {
       txt += ' · point at skin';
     }
-    if (app.mode === 'reveal' && app.phase === 'live' && !app.frozen) {
+    if (app.mode !== 'pulse' && app.phase === 'live' && !app.frozen) {
       if (app.motion > 6) txt += ' · hold still to stack';
       else if (app.motion < 3 && app.state && app.state.stacked) txt += ' · stacked';
     }
@@ -737,8 +687,6 @@
       // same-size photo swaps skip setProcSize's reset, and the display
       // normalization must not carry one image's peak into the next
       app.state = V.makeState();
-      app.lastLabels = null;
-      app.labelTick = 0;
       show('photo');
       // stills normalize directly (no EMA), so the first render is converged
       app.needsRender = true;
@@ -757,14 +705,17 @@
       // pulse needs a live feed: a still has no heartbeat to band-pass
       if (b.dataset.mode === 'pulse') b.disabled = app.phase === 'photo';
     });
-    els.sensRow.hidden = app.mode === 'reveal' || app.mode === 'split';
-    els.legend.hidden = app.mode !== 'trace';
     els.divider.hidden = app.mode !== 'split';
   }
 
   function setMode(m) {
     if (m === 'pulse' && app.phase === 'photo') return;
     app.mode = m;
+    var pe = document.getElementById('ppg');
+    if (pe) pe.hidden = m !== 'pulse';
+    var sr = document.getElementById('strength-row');
+    if (sr) sr.hidden = m === 'pulse';
+    if (m === 'pulse' && app.pulseState) { app.pulseState.n = 0; app.bpmShown = 0; }
     if (app.state) app.state.stacked = false; // fresh stack, no stale ghosts
     app.needsRender = true;
     updateModeUI();
@@ -875,9 +826,8 @@
   document.addEventListener('keydown', function (e) {
     if (e.target.tagName === 'INPUT') return;
     if (e.key === '1') setMode('reveal');
-    if (e.key === '2') setMode('trace');
-    if (e.key === '3') setMode('pulse');
-    if (e.key === '4') setMode('split');
+    if (e.key === '2') setMode('pulse');
+    if (e.key === '3') setMode('split');
     if (e.key === 'f' && app.phase === 'live') els.btnFreeze.click();
     if (e.key === 's') els.btnSave.click();
   });

@@ -7,7 +7,7 @@
 <title>venule — live</title>
 <meta name="description" content="Live vein-contrast visualizer. Runs entirely in your browser.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230c0e10'/%3E%3Cpath d='M16 26V15M16 15c0-5-4-6-6-9M16 15c0-4 4-5 6-8' stroke='%2346e0b4' stroke-width='2.4' stroke-linecap='round' fill='none'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="css/venule.css?v=7">
+<link rel="stylesheet" href="css/venule.css?v=9">
 </head>
 <body class="app">
 
@@ -54,6 +54,11 @@
     <canvas id="labels"></canvas>
     <div id="divider" hidden></div>
   </div>
+  <div id="ppg" hidden>
+    <div id="ppg-bpm">—</div>
+    <div id="ppg-note">Cover the camera lens with a fingertip</div>
+    <canvas id="ppg-wave" width="600" height="120"></canvas>
+  </div>
 </div>
 
 <div id="hud" hidden>
@@ -67,21 +72,16 @@
 </div>
 
 <div id="controls" hidden>
-  <span id="legend" hidden><i class="sw sw-teal"></i>vein-like — not a verified vessel</span>
   <div class="seg" role="tablist" aria-label="View mode">
-    <button data-mode="reveal" class="on">Reveal</button>
-    <button data-mode="trace">Trace</button>
+    <button data-mode="reveal" class="on">Veins</button>
     <button data-mode="pulse">Pulse</button>
-    <button data-mode="split">Split</button>
+    <button data-mode="split">Compare</button>
   </div>
-  <div class="slider-row">
-    <label for="strength">CONTRAST</label>
+  <div class="slider-row" id="strength-row">
+    <label for="strength">AMPLIFY</label>
     <input type="range" id="strength" min="0" max="1" step="0.01" value="0.6">
   </div>
-  <div class="slider-row" id="sens-row">
-    <label for="sensitivity">SENSITIVITY</label>
-    <input type="range" id="sensitivity" min="0" max="1" step="0.01" value="0.55">
-  </div>
+  <input type="range" id="sensitivity" min="0" max="1" step="0.01" value="0.55" hidden>
   <div class="action-row">
     <button id="btn-freeze">Freeze</button>
     <button id="btn-save">Save frame</button>
@@ -93,7 +93,7 @@
 <div id="errtoast" hidden></div>
 <div id="hint" hidden></div>
 
-<script src="js/vision.js?v=7"></script>
-<script src="js/app.js?v=7"></script>
+<script src="js/vision.js?v=9"></script>
+<script src="js/app.js?v=9"></script>
 </body>
 </html>

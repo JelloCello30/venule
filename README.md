@@ -26,41 +26,41 @@ custom domain can be added in the repo's Pages settings.
 
 ## How it works
 
-Two pipelines share the buffers, in [js/vision.js](js/vision.js):
+Grounded in published skin optics rather than tuned heuristics.
 
-**Reveal** (default) — no detection at all. Motion-compensated temporal
-stacking (see below) then local-contrast amplification of the stacked RGB,
-composited over crisp native-res video as a hard-light detail layer.
+**Veins** — melanin/hemoglobin separation (Tsumura et al., *Image-based skin
+color and texture analysis/synthesis*, SIGGRAPH 2003). In optical-density
+space skin colour is a linear mix of melanin, hemoglobin and shading along
+three physically distinct absorbance directions, so one 3x3 solve recovers
+each independently. Consequences that matter:
 
-**Trace** — detection on the spectral ratio map (see "How Trace avoids
-hair"), skin-gated by a union of a MediaPipe `selfie_multiclass` category
-mask (in a worker) and a YCbCr colour gate, then CLAHE, then multi-scale
-Frangi vesselness (σ ≈ {1.4, 2.6, 4.2} scaled to processing width, β = 0.5,
-dark-ridge case only), 99th-percentile normalization, smoothstep threshold,
-and hysteresis connected components for the numbered tags.
+* neutral absorbers — hair, shadow, ink, dim light, exposure drift — scale
+  R, G and B together and land wholly in the *shading* term
+* skin tone lands in the *melanin* term and stops competing with the signal
+* what remains in the *hemoglobin* term is blood, i.e. the vein
 
-Modes: **Reveal** (default; computational photography: motion-compensated
-temporal frame stacking — coarse-to-fine global translation alignment plus
-exposure normalization, so handheld shake still stacks — then soft-clipped
-unsharp amplification of the stacked RGB at vein scales, composited as a
-hard-light detail layer over crisp native-res video, skin-gated; press and
-hold the stage to peek at the raw feed), **Trace** (detection + numbered
-tags in one view), **Pulse** (rPPG: per-pixel temporal band-pass via dual
-EMAs at 120px width, energy map in coral, heart rate from autocorrelation —
-live feed only), **Split** (raw | processed, draggable divider).
+That hemoglobin map is motion-compensated temporally stacked (night-mode
+style), band-passed at vein scales, weighted by Frangi-style tubularity
+computed **on the hemoglobin map** (run on brightness, a ridge filter cannot
+tell a vein from a hair — that was the old failure), and amplified with a
+self-calibrating gain (95th-percentile of blood detail → fixed on-screen
+amplitude, so the view neither vanishes nor blows out across skin tones,
+lighting and cameras). Composited as a hard-light layer over crisp
+native-resolution video.
 
-**How Trace avoids hair.** The detector input is the spectral ratio
-B/((R+G)/2), not luminance. Neutral absorbers — hair, shadows, creases, ink,
-dim light — scale R, G and B together, which leaves that ratio unchanged, so
-they cannot produce a ridge. A vein can't be neutral: blue light doesn't
-reach vein depth, so it dims R and G alone and the ratio rises. A gate keeps
-only pixels deviating vein-ward from their local surroundings, then Frangi
-vesselness traces the surviving dark ridges. Measured 588x more overlay on
-veins than on hair strands in `test/test.html`, which includes hair strands
-as explicit false-positive controls. Artery *outlines* are absent by
-design: arteries sit below visible-light penetration depth, so the image
-contains no artery-shape signal — pulsation is the part that survives, and
-Pulse mode shows exactly that.
+Measured in `test/test.html`: veins amplify 10x more than hair (hair ends up
+quieter than plain skin), vein signal survives 181x stronger than an
+illumination gradient, and 99% of it survives on much darker skin.
+
+**Pulse** — fingertip contact PPG: finger over the lens, torch on, green
+channel, autocorrelation. This replaced a non-contact (rPPG) attempt that
+never locked; contact PPG on a phone validates against ECG at r = 0.997 /
+RMSE ~1 bpm, while non-contact needs a face, a tripod and clean light to
+reach a fraction of that. Verified at 69.2 bpm against a 69 bpm reference,
+and it refuses to report a number when the lens is not covered.
+
+**Compare** — raw | processed with a draggable divider. Press and hold the
+image anywhere to peek at the raw feed.
 
 [js/app.js](js/app.js) handles camera plumbing and adapts processing resolution
 (256–512 px wide) to hold ~30 fps on the current machine. Frozen frames and

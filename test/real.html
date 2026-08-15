@@ -101,35 +101,31 @@ try {
     var data = xin.getImageData(0, 0, W, H);
 
     var bufs = V.makeBuffers(W, H);
-    var state = V.makeState();
     var cat = await segmentCanvas(cIn);
-    var res = V.analyze(data.data, bufs, state,
-      { mode: 'trace', strength: 0.6, sensitivity: 0.55, still: true, labels: true,
-        catMask: cat && cat.data, catW: cat ? cat.w : 0, catH: cat ? cat.h : 0 });
+    var segArgs = { catMask: cat && cat.data, catW: cat ? cat.w : 0, catH: cat ? cat.h : 0 };
 
-    // mask panel
-    var cM = panel(row, 'skin mask (' + (res.skinFrac * 100).toFixed(0) + '%)', W, H);
-    var im2 = cM.getContext('2d').createImageData(W, H);
-    for (var i = 0, j = 0; i < W * H; i++, j += 4) {
-      var m = bufs.mask[i] * 255;
-      im2.data[j] = m; im2.data[j + 1] = m; im2.data[j + 2] = m; im2.data[j + 3] = 255;
+    // hemoglobin map panel (the physical quantity the view is built on)
+    var hemo = new Float32Array(W * H);
+    var shade = new Float32Array(W * H);
+    V.hemoglobinMap(data.data, null, null, null, hemo, W * H, shade);
+    var cH = panel(row, 'hemoglobin (blood)', W, H);
+    var imH = cH.getContext('2d').createImageData(W, H);
+    var lo = 1e9, hi = -1e9, k;
+    for (k = 0; k < W * H; k++) { if (hemo[k] < lo) lo = hemo[k]; if (hemo[k] > hi) hi = hemo[k]; }
+    for (k = 0; k < W * H; k++) {
+      var vv = (hemo[k] - lo) / (hi - lo + 1e-9) * 255, kj = k * 4;
+      imH.data[kj] = vv; imH.data[kj + 1] = vv; imH.data[kj + 2] = vv; imH.data[kj + 3] = 255;
     }
-    cM.getContext('2d').putImageData(im2, 0, 0);
+    cH.getContext('2d').putImageData(imH, 0, 0);
 
-    // enhance panel
-    var cE = panel(row, 'opponent + CLAHE', W, H);
-    var im3 = cE.getContext('2d').createImageData(W, H);
-    for (var q = 0, qj = 0; q < W * H; q++, qj += 4) { var qv = bufs.eq[q]; im3.data[qj] = qv; im3.data[qj+1] = qv; im3.data[qj+2] = qv; im3.data[qj+3] = 255; }
-    cE.getContext('2d').putImageData(im3, 0, 0);
-
-    // reveal panel (the app's default view): base + hard-light detail layer
-    var cR = panel(row, 'reveal (default mode)', W, H);
+    // the shipped Veins view
+    var state = V.makeState();
+    var revImg = new ImageData(W, H);
+    var res = V.analyzeReveal(data.data, revImg.data, bufs, state,
+      { strength: 0.6, still: true, catMask: segArgs.catMask, catW: segArgs.catW, catH: segArgs.catH });
+    var cR = panel(row, 'Veins view (shipped)', W, H);
     var xr = cR.getContext('2d');
     xr.drawImage(img, 0, 0, W, H);
-    var stateR = V.makeState();
-    var revImg = xr.createImageData(W, H);
-    V.analyzeReveal(data.data, revImg.data, bufs, stateR,
-      { strength: 0.6, still: true, catMask: cat && cat.data, catW: cat ? cat.w : 0, catH: cat ? cat.h : 0 });
     var revC = document.createElement('canvas');
     revC.width = W; revC.height = H;
     revC.getContext('2d').putImageData(revImg, 0, 0);
@@ -137,62 +133,48 @@ try {
     xr.drawImage(revC, 0, 0);
     xr.globalCompositeOperation = 'source-over';
 
-    // composite panel (the annotation view)
-    var cO = panel(row, 'veins overlay', W, H);
-    var xo = cO.getContext('2d');
-    xo.drawImage(img, 0, 0, W, H);
-    xo.fillStyle = 'rgba(6,8,10,0.16)';
-    xo.fillRect(0, 0, W, H);
-    var ov = xo.createImageData(W, H);
-    V.renderOverlay(bufs, ov.data);
-    var ovC = document.createElement('canvas');
-    ovC.width = W; ovC.height = H;
-    ovC.getContext('2d').putImageData(ov, 0, 0);
-    xo.drawImage(ovC, 0, 0);
-
-    // overlay statistics + hair discrimination.
-    // A hair is a NEUTRAL absorber: locally dark in luminance, unchanged in
-    // the spectral ratio. A vein is the opposite. For every lit pixel we
-    // compare how vein-like vs how hair-like it is; lit pixels should be
-    // dominated by spectral (vein) evidence, not plain darkness.
-    var lum = new Float32Array(W * H), spec = new Float32Array(W * H);
-    for (var q = 0, qj = 0; q < W * H; q++, qj += 4) {
-      var R = data.data[qj], G = data.data[qj + 1], B = data.data[qj + 2];
-      lum[q] = 0.299 * R + 0.587 * G + 0.114 * B;
-      spec[q] = B / (0.5 * (R + G) + 4);
+    // How much of the output is driven by blood vs by plain darkness?
+    // For every strongly-amplified pixel, compare its hemoglobin lift
+    // against its neutral (shading) lift. >1 means blood is driving it.
+    var lumA = new Float32Array(W * H);
+    for (k = 0; k < W * H; k++) {
+      var kj2 = k * 4;
+      lumA[k] = 0.299 * data.data[kj2] + 0.587 * data.data[kj2 + 1] + 0.114 * data.data[kj2 + 2];
     }
-    function localMean(src) {
-      var out = new Float32Array(W * H), rad = 9;
+    function blur(src) {
+      var o = new Float32Array(W * H), rad = 8;
       for (var y = 0; y < H; y++) {
         for (var x = 0; x < W; x++) {
-          var acc = 0, c = 0;
+          var acc = 0, c2 = 0;
           for (var yy = Math.max(0, y - rad); yy <= Math.min(H - 1, y + rad); yy += 3) {
             for (var xx = Math.max(0, x - rad); xx <= Math.min(W - 1, x + rad); xx += 3) {
-              acc += src[yy * W + xx]; c++;
+              acc += src[yy * W + xx]; c2++;
             }
           }
-          out[y * W + x] = acc / c;
+          o[y * W + x] = acc / c2;
         }
       }
-      return out;
+      return o;
     }
-    var lumM = localMean(lum), specM = localMean(spec);
-    var aN = 0, aOn = 0, darkDev = 0, specDev = 0;
-    for (var q2 = 0; q2 < W * H; q2++) {
-      if (bufs.mask[q2] > 0.5) aN++;
-      if (bufs.alpha[q2] > 0.25) {
-        aOn++;
-        darkDev += Math.max(0, lumM[q2] - lum[q2]) / 255;      // neutral darkness
-        specDev += Math.max(0, spec[q2] - specM[q2]);          // vein-ward shift
+    var hemoM = blur(hemo), shadeM = blur(shade);
+    var lit = 0, litN = 0, hemoEv = 0, shadeEv = 0, maskN = 0;
+    for (k = 0; k < W * H; k++) {
+      if (bufs.mask[k] > 0.5) maskN++;
+      var amp = Math.abs(revImg.data[k * 4] - 128);
+      if (amp > 18) {
+        litN++;
+        hemoEv += Math.max(0, hemo[k] - hemoM[k]);
+        shadeEv += Math.abs(shade[k] - shadeM[k]);
       }
+      lit += amp;
     }
     report[f] = {
       maskSource: cat ? 'neural' : 'color',
       skin: +(res.skinFrac).toFixed(3),
-      litFracOfSkin: aN ? +(aOn / aN).toFixed(4) : 0,
-      labels: res.labels ? res.labels.length : 0,
-      // >1 means lit pixels are driven by vein spectrum, not by darkness
-      veinVsHairEvidence: aOn ? +((specDev / aOn) / Math.max(darkDev / aOn, 1e-6)).toFixed(2) : 0
+      amplifiedFracOfSkin: maskN ? +(litN / maskN).toFixed(4) : 0,
+      // >1 means the amplified pixels are driven by BLOOD, not by neutral
+      // darkness (hair, shadow, crease)
+      bloodVsNeutralEvidence: litN ? +((hemoEv / litN) / Math.max(shadeEv / litN, 1e-9)).toFixed(2) : 0
     };
   }
 

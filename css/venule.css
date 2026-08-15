@@ -235,6 +235,23 @@ body.app {
 }
 .action-row button:hover { border-color: var(--mut-d); }
 
+#ppg {
+  position: fixed; inset: 0; z-index: 6;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; background: rgba(12, 14, 16, 0.9); pointer-events: none;
+  padding: 0 20px;
+}
+#ppg-bpm {
+  font-family: var(--mono); font-size: clamp(56px, 17vw, 104px);
+  font-weight: 600; letter-spacing: -0.03em; color: var(--acc); line-height: 1;
+}
+#ppg-bpm span { font-size: 0.26em; color: var(--mut-d); margin-left: 8px; letter-spacing: 0.1em; }
+#ppg-note {
+  font-family: var(--mono); font-size: 13px; color: var(--mut-d);
+  text-align: center; max-width: 30ch; line-height: 1.5;
+}
+#ppg-wave { width: min(560px, 88vw); height: 110px; }
+
 #hint {
   position: fixed; left: 50%; bottom: calc(200px + env(safe-area-inset-bottom));
   transform: translateX(-50%); z-index: 18; white-space: nowrap;

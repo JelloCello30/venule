@@ -9,40 +9,44 @@
   .row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
   figure { margin: 0; }
   figcaption { font-size: 11px; color: #97a19c; margin-top: 4px; }
-  canvas { border: 1px solid rgba(255,255,255,.15); image-rendering: pixelated; width: 360px; }
+  canvas { border: 1px solid rgba(255,255,255,.15); width: 340px; }
   #summary { font-size: 13px; white-space: pre; background: #15181b; padding: 14px; border-radius: 8px; margin-top: 8px; }
   .pass { color: #46e0b4; } .fail { color: #ff7a5c; }
 </style>
 </head>
 <body>
-<h1>venule pipeline test — synthetic arm with known vein positions</h1>
+<h1>venule pipeline test — synthetic arm, known veins, known false positives</h1>
 <div id="summary">running…</div>
 <div class="row">
-  <figure><canvas id="c-in"></canvas><figcaption>input (synthetic skin + faint veins)</figcaption></figure>
-  <figure><canvas id="c-eq"></canvas><figcaption>opponent + CLAHE</figcaption></figure>
-  <figure><canvas id="c-vess"></canvas><figcaption>vesselness (normalized)</figcaption></figure>
-  <figure><canvas id="c-out"></canvas><figcaption>trace composite</figcaption></figure>
+  <figure><canvas id="c-in"></canvas><figcaption>input (veins + hair + shading)</figcaption></figure>
+  <figure><canvas id="c-hemo"></canvas><figcaption>hemoglobin map</figcaption></figure>
+  <figure><canvas id="c-out"></canvas><figcaption>Veins view (as shipped)</figcaption></figure>
 </div>
 
 <script src="../js/vision.js"></script>
 <script>
 (function () {
   'use strict';
-  var W = 480, H = 360;
+  var W = 480, H = 360, N = W * H;
   var V = window.VenuleVision;
 
-  // deterministic LCG so runs are reproducible
   var seed = 12345;
   function rnd() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
 
-  // Neutral absorbers that must NOT be traced: hairs (thin, dark, grey)
-  // and a shadow crease (broad, dark, grey). Same darkness as the veins,
-  // no vein-ward chroma shift.
-  var HAIRS = [
-    { w: 3, a: 0.42, p: [[70, 60], [180, 130], [300, 120], [430, 190]] },
-    { w: 2, a: 0.38, p: [[100, 250], [230, 300], [360, 250]] },
-    { w: 4, a: 0.34, p: [[380, 330], [430, 250], [460, 140]] }
+  // ---- scene definition -------------------------------------------------
+  var VEINS = [
+    { w: 8, a: 0.30, p: [[40, 300], [140, 220], [260, 200], [430, 120]] },
+    { w: 5, a: 0.24, p: [[80, 340], [180, 300], [300, 290], [440, 230]] },
+    { w: 4, a: 0.16, p: [[30, 180], [140, 150], [240, 170], [400, 60]] }
   ];
+  // Neutral absorbers that must NOT be amplified: hairs and a shadow band.
+  // Neutral = same multiplicative factor on R, G and B.
+  var HAIRS = [
+    { w: 3, k: 0.55, p: [[70, 60], [180, 130], [300, 120], [430, 190]] },
+    { w: 2, k: 0.60, p: [[100, 250], [230, 300], [360, 250]] },
+    { w: 4, k: 0.62, p: [[380, 330], [430, 250], [460, 140]] }
+  ];
+
   function strokePath(ctx, p) {
     ctx.beginPath();
     ctx.moveTo(p[0][0], p[0][1]);
@@ -53,319 +57,308 @@
     ctx.lineTo(p[p.length - 1][0], p[p.length - 1][1]);
     ctx.stroke();
   }
-  function strokeHairs(ctx, style) {
-    ctx.lineCap = 'round';
-    HAIRS.forEach(function (v) {
-      if (style === 'mask') { ctx.strokeStyle = '#fff'; ctx.lineWidth = v.w + 10; }
-      else { ctx.strokeStyle = 'rgba(60,52,46,' + v.a + ')'; ctx.lineWidth = v.w; }
-      strokePath(ctx, v.p);
-    });
+
+  function maskOf(list, pad) {
+    var c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    var ctx = c.getContext('2d');
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = '#fff'; ctx.lineCap = 'round';
+    list.forEach(function (v) { ctx.lineWidth = v.w + pad; strokePath(ctx, v.p); });
+    var d = ctx.getImageData(0, 0, W, H).data;
+    var m = new Uint8Array(N);
+    for (var i = 0; i < N; i++) m[i] = d[i * 4] > 128 ? 1 : 0;
+    return m;
   }
 
-  function strokeVeins(ctx, style) {
-    // three veins of different widths/faintness at known positions
-    var paths = [
-      { w: 7, a: 0.32, p: [[40, 300], [140, 220], [260, 200], [430, 120]] },
-      { w: 4, a: 0.26, p: [[80, 340], [180, 300], [300, 290], [440, 230]] },
-      { w: 3, a: 0.16, p: [[30, 180], [140, 150], [240, 170], [400, 60]] }
-    ];
-    paths.forEach(function (v) {
-      ctx.beginPath();
-      ctx.moveTo(v.p[0][0], v.p[0][1]);
-      for (var i = 1; i < v.p.length - 1; i++) {
-        var xc = (v.p[i][0] + v.p[i + 1][0]) / 2, yc = (v.p[i][1] + v.p[i + 1][1]) / 2;
-        ctx.quadraticCurveTo(v.p[i][0], v.p[i][1], xc, yc);
+  var veinMask = maskOf(VEINS, 0);
+  var veinPad = maskOf(VEINS, 14);
+  var hairMask = maskOf(HAIRS, 8);
+  var hairPad = maskOf(HAIRS, 16);
+
+  // Build the scene physically: start from a skin base, apply a smooth
+  // illumination gradient (neutral), multiply hairs in (neutral), and add
+  // hemoglobin to veins (NOT neutral — absorbs green/red, spares blue).
+  // skinTone scales melanin, letting us prove tone-invariance.
+  function buildScene(skinTone) {
+    var base = [214 * skinTone, 176 * skinTone * 0.92, 150 * skinTone * 0.86];
+    var px = new Uint8ClampedArray(N * 4);
+    var vm = maskOf(VEINS, 0), hm = maskOf(HAIRS, 0);
+    // soft-edged versions for realism
+    for (var y = 0; y < H; y++) {
+      for (var x = 0; x < W; x++) {
+        var i = y * W + x, j = i * 4;
+        // neutral illumination gradient + gentle mottling
+        var shade = 0.72 + 0.38 * (x / W) + 0.10 * Math.sin(y * 0.017) + 0.05 * Math.sin(x * 0.021);
+        var r = base[0] * shade, g = base[1] * shade, b = base[2] * shade;
+        if (hm[i]) { var k = 0.58; r *= k; g *= k; b *= k; }   // hair: neutral
+        if (vm[i]) {                                            // vein: spectral
+          r *= 0.90; g *= 0.82; b *= 0.985;
+        }
+        var nz = (rnd() - 0.5) * 9;
+        px[j] = r + nz; px[j + 1] = g + nz; px[j + 2] = b + nz; px[j + 3] = 255;
       }
-      ctx.lineTo(v.p[v.p.length - 1][0], v.p[v.p.length - 1][1]);
-      ctx.lineCap = 'round';
-      if (style === 'truth') { ctx.strokeStyle = '#fff'; ctx.lineWidth = v.w; }
-      else if (style === 'exclude') { ctx.strokeStyle = '#fff'; ctx.lineWidth = v.w + 14; }
-      // veins keep red, lose blue — the signature the detector keys on
-      else { ctx.strokeStyle = 'rgba(150,120,160,' + v.a + ')'; ctx.lineWidth = v.w; }
-      ctx.stroke();
-    });
-  }
-
-  function buildInput() {
-    var c = document.getElementById('c-in');
-    c.width = W; c.height = H;
-    var ctx = c.getContext('2d');
-    ctx.fillStyle = 'rgb(206,172,150)';           // skin-ish base
-    ctx.fillRect(0, 0, W, H);
-    for (var i = 0; i < 45; i++) {                 // low-frequency mottling
-      var gx = rnd() * W, gy = rnd() * H, gr = 30 + rnd() * 80;
-      var g = ctx.createRadialGradient(gx, gy, 0, gx, gy, gr);
-      var d = Math.round((rnd() - 0.5) * 22);
-      g.addColorStop(0, 'rgba(' + (206 + d) + ',' + (172 + d) + ',' + (150 + d) + ',0.35)');
-      g.addColorStop(1, 'rgba(' + (206 + d) + ',' + (172 + d) + ',' + (150 + d) + ',0)');
-      ctx.fillStyle = g;
-      ctx.fillRect(0, 0, W, H);
     }
-    strokeVeins(ctx, 'veins');
-    strokeHairs(ctx, 'hairs');
-    var img = ctx.getImageData(0, 0, W, H);
-    var pristine = new Uint8ClampedArray(img.data); // noise-free copy for the stacking test
-    for (var j = 0; j < img.data.length; j += 4) {  // per-pixel sensor noise
-      var n = (rnd() - 0.5) * 12;
-      img.data[j] += n; img.data[j + 1] += n; img.data[j + 2] += n;
+    return px;
+  }
+
+  var input = buildScene(1.0);
+  var cIn = document.getElementById('c-in');
+  cIn.width = W; cIn.height = H;
+  cIn.getContext('2d').putImageData(new ImageData(input, W, H), 0, 0);
+
+  function stats(arr, mask, exclude) {
+    var s = 0, n = 0;
+    for (var i = 0; i < N; i++) {
+      var x = i % W, y = (i / W) | 0;
+      if (x < 10 || y < 10 || x >= W - 10 || y >= H - 10) continue;
+      if (mask ? !mask[i] : (exclude && exclude[i])) continue;
+      s += arr[i]; n++;
     }
-    ctx.putImageData(img, 0, 0);
-    return { img: img, pristine: pristine };
+    return { mean: s / Math.max(n, 1), n: n };
   }
 
-  function buildMask(style) {
-    var c = document.createElement('canvas');
-    c.width = W; c.height = H;
-    var ctx = c.getContext('2d');
-    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
-    strokeVeins(ctx, style);
-    var d = ctx.getImageData(0, 0, W, H).data;
-    var m = new Uint8Array(W * H);
-    for (var i = 0; i < W * H; i++) m[i] = d[i * 4] > 128 ? 1 : 0;
-    return m;
+  // ---- 1. hemoglobin separation ----------------------------------------
+  var hemo = new Float32Array(N);
+  V.hemoglobinMap(input, null, null, null, hemo, N);
+
+  var hOnVein = stats(hemo, veinMask).mean;
+  var hOnHair = stats(hemo, hairMask).mean;
+  var hOnSkin = stats(hemo, null, function (i) { return veinPad[i] || hairPad[i]; }).mean;
+  // recompute plain-skin baseline properly (exclude both structures)
+  var skinSum = 0, skinN = 0;
+  for (var q = 0; q < N; q++) {
+    var qx = q % W, qy = (q / W) | 0;
+    if (qx < 10 || qy < 10 || qx >= W - 10 || qy >= H - 10) continue;
+    if (veinPad[q] || hairPad[q]) continue;
+    skinSum += hemo[q]; skinN++;
   }
+  hOnSkin = skinSum / skinN;
 
-  function grayToCanvas(id, arr, scale) {
-    var c = document.getElementById(id);
-    c.width = W; c.height = H;
-    var ctx = c.getContext('2d');
-    var img = ctx.createImageData(W, H);
-    for (var i = 0, j = 0; i < W * H; i++, j += 4) {
-      var v = Math.max(0, Math.min(255, arr[i] * (scale || 1)));
-      img.data[j] = v; img.data[j + 1] = v; img.data[j + 2] = v; img.data[j + 3] = 255;
-    }
-    ctx.putImageData(img, 0, 0);
+  var veinLift = hOnVein - hOnSkin;   // must be clearly positive
+  var hairLift = hOnHair - hOnSkin;   // must be ~0 (neutral absorber)
+  var separation = veinLift / Math.max(Math.abs(hairLift), 1e-6);
+
+  // ---- 2. shading invariance -------------------------------------------
+  // The illumination gradient spans 0.72..1.10 across the frame. A method
+  // that keys on brightness would show a big left-right drift in "skin".
+  var leftSum = 0, leftN = 0, rightSum = 0, rightN = 0;
+  for (var s2 = 0; s2 < N; s2++) {
+    var sx = s2 % W, sy = (s2 / W) | 0;
+    if (sy < 10 || sy >= H - 10) continue;
+    if (veinPad[s2] || hairPad[s2]) continue;
+    if (sx > 20 && sx < W * 0.25) { leftSum += hemo[s2]; leftN++; }
+    if (sx > W * 0.75 && sx < W - 20) { rightSum += hemo[s2]; rightN++; }
   }
+  var shadingDrift = Math.abs(leftSum / leftN - rightSum / rightN);
+  var shadingVsVein = veinLift / Math.max(shadingDrift, 1e-6);
 
-  var built = buildInput();
-  var input = built.img, pristine = built.pristine;
-  var truth = buildMask('truth');
-  var exclude = buildMask('exclude');
-
-  function buildHairMask() {
-    var c = document.createElement('canvas');
-    c.width = W; c.height = H;
-    var ctx = c.getContext('2d');
-    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
-    strokeHairs(ctx, 'mask');
-    var d = ctx.getImageData(0, 0, W, H).data;
-    var m = new Uint8Array(W * H);
-    for (var i = 0; i < W * H; i++) m[i] = d[i * 4] > 128 ? 1 : 0;
-    return m;
+  // ---- 3. skin-tone invariance -----------------------------------------
+  // Same veins, much darker skin. The vein lift should survive, because
+  // melanin lands in its own term.
+  var darkInput = buildScene(0.55);
+  var hemoDark = new Float32Array(N);
+  V.hemoglobinMap(darkInput, null, null, null, hemoDark, N);
+  var dOnVein = stats(hemoDark, veinMask).mean;
+  var dSum = 0, dN = 0;
+  for (var r2 = 0; r2 < N; r2++) {
+    var rx = r2 % W, ry = (r2 / W) | 0;
+    if (rx < 10 || ry < 10 || rx >= W - 10 || ry >= H - 10) continue;
+    if (veinPad[r2] || hairPad[r2]) continue;
+    dSum += hemoDark[r2]; dN++;
   }
-  var hairMask = buildHairMask();
+  var darkVeinLift = dOnVein - dSum / dN;
+  var toneRetention = darkVeinLift / Math.max(veinLift, 1e-9);
 
+  // ---- 4. end-to-end Veins view ----------------------------------------
   var bufs = V.makeBuffers(W, H);
   var state = V.makeState();
-  var params = { mode: 'trace', strength: 0.6, sensitivity: 0.55, still: true };
-
+  var out = new ImageData(W, H);
   var t0 = performance.now();
-  var res1 = V.analyze(input.data, bufs, state, params);
-  V.analyze(input.data, bufs, state, params);
-  var ms = (performance.now() - t0) / 2;
-  var skinFrac = res1.skinFrac;
+  var res = V.analyzeReveal(input, out.data, bufs, state, { strength: 0.6, still: true });
+  var ms = performance.now() - t0;
 
-  // labels: components should land on the drawn veins
-  params.labels = true;
-  var comps = V.analyze(input.data, bufs, state, params).labels || [];
-  params.labels = false;
+  // deviation from the 128 neutral in the shipped layer
+  var dev = new Float32Array(N);
+  for (var d2 = 0; d2 < N; d2++) dev[d2] = Math.abs(out.data[d2 * 4] - 128);
+  var devVein = stats(dev, veinMask).mean;
+  var devHair = stats(dev, hairMask).mean;
+  var devSkin = (function () {
+    var s3 = 0, n3 = 0;
+    for (var i = 0; i < N; i++) {
+      var x = i % W, y = (i / W) | 0;
+      if (x < 10 || y < 10 || x >= W - 10 || y >= H - 10) continue;
+      if (veinPad[i] || hairPad[i]) continue;
+      s3 += dev[i]; n3++;
+    }
+    return s3 / n3;
+  })();
+  var renderVeinVsHair = devVein / Math.max(devHair, 1e-6);
 
-  // HAIR REJECTION: overlay opacity on hair strands vs on veins.
-  // This is the user-reported failure — hairs traced as veins.
-  var hairLit = 0, hairN = 0, veinLit = 0, veinN = 0;
-  for (var hi = 0; hi < W * H; hi++) {
-    var hx = hi % W, hy = (hi / W) | 0;
-    if (hx < 8 || hy < 8 || hx >= W - 8 || hy >= H - 8) continue;
-    if (hairMask[hi]) { hairLit += bufs.alpha[hi]; hairN++; }
-    if (truth[hi]) { veinLit += bufs.alpha[hi]; veinN++; }
-  }
-  var hairMean = hairLit / Math.max(hairN, 1);
-  var veinMean = veinLit / Math.max(veinN, 1);
-  var hairReject = veinMean / Math.max(hairMean, 1e-6);
-  var compsOnHair = comps.filter(function (c) {
-    return hairMask[Math.round(c.y) * W + Math.round(c.x)] === 1;
-  }).length;
-
-  // veins composite panel: crisp base + alpha overlay, like the app draws
-  var oc = document.getElementById('c-out');
-  oc.width = W; oc.height = H;
-  var octx = oc.getContext('2d');
-  octx.drawImage(document.getElementById('c-in'), 0, 0);
-  octx.fillStyle = 'rgba(6,8,10,0.16)';
-  octx.fillRect(0, 0, W, H);
-  var ovImg = new ImageData(W, H);
-  V.renderOverlay(bufs, ovImg.data, false);
-  var ovC = document.createElement('canvas');
-  ovC.width = W; ovC.height = H;
-  ovC.getContext('2d').putImageData(ovImg, 0, 0);
-  octx.drawImage(ovC, 0, 0);
-
-
-  // reveal: in-place amplification must lift veins well above the floor
-  var rev = new ImageData(W, H);
-  var stateR = V.makeState();
-  V.analyzeReveal(input.data, rev.data, bufs, stateR, { strength: 0.6, still: true });
-  var rOn = 0, rOnN = 0, rOff = 0, rOffN = 0;
-  for (var ri = 0; ri < W * H; ri++) {
-    var rx = ri % W, ry = (ri / W) | 0;
-    if (rx < 8 || ry < 8 || rx >= W - 8 || ry >= H - 8) continue;
-    var dg = rev.data[ri * 4 + 1] - 128;
-    if (dg < 0) dg = -dg;
-    if (truth[ri]) { rOn += dg; rOnN++; }
-    else if (!exclude[ri]) { rOff += dg; rOffN++; }
-  }
-  var revOn = rOn / rOnN, revOff = rOff / rOffN;
-  var revealRatio = revOn / Math.max(revOff, 1e-9);
-
-  // stacking: 25 fresh-noise frames of the same scene must beat one frame
-  function noisyFrame() {
-    var f = new Uint8ClampedArray(pristine);
-    for (var q = 0; q < f.length; q += 4) {
-      var nz = (rnd() - 0.5) * 12;
-      f[q] += nz; f[q + 1] += nz; f[q + 2] += nz;
+  // ---- 5. temporal stacking --------------------------------------------
+  function noisy(px) {
+    var f = new Uint8ClampedArray(px);
+    for (var q2 = 0; q2 < f.length; q2 += 4) {
+      var nz = (rnd() - 0.5) * 14;
+      f[q2] += nz; f[q2 + 1] += nz; f[q2 + 2] += nz;
     }
     return f;
   }
-  function offNoise(revData) {
-    var s = 0, n2 = 0;
-    for (var q = 0; q < W * H; q++) {
-      var qx = q % W, qy = (q / W) | 0;
-      if (qx < 8 || qy < 8 || qx >= W - 8 || qy >= H - 8) continue;
-      if (truth[q] || exclude[q] || hairMask[q]) continue; // hairs are real detail, not noise
-      var d = revData[q * 4 + 1] - 128;
-      s += d < 0 ? -d : d; n2++;
-    }
-    return s / n2;
-  }
-  var stateS = V.makeState();
-  V.analyzeReveal(noisyFrame(), rev.data, bufs, stateS, { strength: 0.6, still: false });
-  var singleNoise = offNoise(rev.data);
-  for (var sf = 0; sf < 25; sf++) {
-    V.analyzeReveal(noisyFrame(), rev.data, bufs, stateS, { strength: 0.6, still: false });
-  }
-  var stackedNoise = offNoise(rev.data);
-  var stackDrop = stackedNoise / Math.max(singleNoise, 1e-9);
-
-  // alignment: 25 frames with random ±5px global shifts (simulated hand
-  // shake) — the motion-compensated stack must keep veins sharp where an
-  // unaligned average would smear them away
-  function shiftedNoisyFrame(dx, dy) {
-    var f = new Uint8ClampedArray(W * H * 4);
-    for (var y2 = 0; y2 < H; y2++) {
-      var sy = Math.min(H - 1, Math.max(0, y2 + dy));
-      for (var x2 = 0; x2 < W; x2++) {
-        var sx = Math.min(W - 1, Math.max(0, x2 + dx));
-        var si = (sy * W + sx) * 4, di = (y2 * W + x2) * 4;
-        var nz = (rnd() - 0.5) * 12;
-        f[di] = pristine[si] + nz; f[di + 1] = pristine[si + 1] + nz;
-        f[di + 2] = pristine[si + 2] + nz; f[di + 3] = 255;
+  function shifted(px, dx, dy) {
+    var f = new Uint8ClampedArray(N * 4);
+    for (var y = 0; y < H; y++) {
+      var sy = Math.min(H - 1, Math.max(0, y + dy));
+      for (var x = 0; x < W; x++) {
+        var sx = Math.min(W - 1, Math.max(0, x + dx));
+        var si = (sy * W + sx) * 4, di = (y * W + x) * 4;
+        var nz = (rnd() - 0.5) * 14;
+        f[di] = px[si] + nz; f[di + 1] = px[si + 1] + nz;
+        f[di + 2] = px[si + 2] + nz; f[di + 3] = 255;
       }
     }
     return f;
   }
-  var stateA = V.makeState();
-  V.analyzeReveal(shiftedNoisyFrame(0, 0), rev.data, bufs, stateA, { strength: 0.6, still: false });
-  for (var af = 0; af < 25; af++) {
-    var adx = ((rnd() * 11) | 0) - 5, ady = ((rnd() * 11) | 0) - 5;
-    V.analyzeReveal(shiftedNoisyFrame(adx, ady), rev.data, bufs, stateA, { strength: 0.6, still: false });
-  }
-  // land on an unshifted frame so output coordinates match the truth mask
-  V.analyzeReveal(shiftedNoisyFrame(0, 0), rev.data, bufs, stateA, { strength: 0.6, still: false });
-  var aOn2 = 0, aOnN2 = 0;
-  for (var ai = 0; ai < W * H; ai++) {
-    var ax = ai % W, ay = (ai / W) | 0;
-    if (ax < 12 || ay < 12 || ax >= W - 12 || ay >= H - 12) continue;
-    if (!truth[ai]) continue;
-    var ad = rev.data[ai * 4 + 1] - 128;
-    aOn2 += ad < 0 ? -ad : ad; aOnN2++;
-  }
-  var alignedOn = aOn2 / aOnN2;
-  var alignedNoise = offNoise(rev.data);
-  var alignDrop = alignedNoise / Math.max(singleNoise, 1e-9);
-
-  // pulse mode: left half of a synthetic clip oscillates at 1.2 Hz (72 bpm)
-  // under noise; the energy map must localize it and the BPM must be right
-  var PW = 120, PH = 90;
-  var ps = V.makePulseState(PW, PH);
-  var pframe = new Uint8ClampedArray(PW * PH * 4);
-  var half = PW >> 1;
-  for (var f = 0; f < 240; f++) {
-    var tMs = f * (1000 / 30);
-    var beat = Math.sin(2 * Math.PI * 1.2 * (tMs / 1000)) * 1.8;
-    for (var py = 0; py < PH; py++) {
-      for (var px = 0; px < PW; px++) {
-        var gv = 128 + (rnd() - 0.5) * 5 + (px < half ? beat : 0);
-        var jj = (py * PW + px) * 4;
-        pframe[jj] = gv; pframe[jj + 1] = gv; pframe[jj + 2] = gv; pframe[jj + 3] = 255;
-      }
+  function skinNoiseOf(o) {
+    var s4 = 0, n4 = 0;
+    for (var i = 0; i < N; i++) {
+      var x = i % W, y = (i / W) | 0;
+      if (x < 14 || y < 14 || x >= W - 14 || y >= H - 14) continue;
+      if (veinPad[i] || hairPad[i]) continue;
+      s4 += Math.abs(o.data[i * 4] - 128); n4++;
     }
-    V.pulseUpdate(ps, pframe, tMs);
+    return s4 / n4;
   }
-  var eA = 0, eB = 0;
-  for (var pyy = 0; pyy < PH; pyy++) {
-    for (var pxx = 0; pxx < PW; pxx++) {
-      var ee = ps.energy[pyy * PW + pxx];
-      if (pxx < half) eA += ee; else eB += ee;
+  var stS = V.makeState();
+  V.analyzeReveal(noisy(input), out.data, bufs, stS, { strength: 0.6, still: false });
+  var noise1 = skinNoiseOf(out);
+  for (var f2 = 0; f2 < 25; f2++) {
+    V.analyzeReveal(noisy(input), out.data, bufs, stS, { strength: 0.6, still: false });
+  }
+  var noiseStacked = skinNoiseOf(out);
+  var stackDrop = noiseStacked / Math.max(noise1, 1e-9);
+
+  // shaken stack: ±5 px per frame
+  var stA = V.makeState();
+  V.analyzeReveal(shifted(input, 0, 0), out.data, bufs, stA, { strength: 0.6, still: false });
+  for (var f3 = 0; f3 < 25; f3++) {
+    V.analyzeReveal(shifted(input, ((rnd() * 11) | 0) - 5, ((rnd() * 11) | 0) - 5),
+      out.data, bufs, stA, { strength: 0.6, still: false });
+  }
+  V.analyzeReveal(shifted(input, 0, 0), out.data, bufs, stA, { strength: 0.6, still: false });
+  var shakenVein = (function () {
+    var s5 = 0, n5 = 0;
+    for (var i = 0; i < N; i++) {
+      var x = i % W, y = (i / W) | 0;
+      if (x < 16 || y < 16 || x >= W - 16 || y >= H - 16) continue;
+      if (!veinMask[i]) continue;
+      s5 += Math.abs(out.data[i * 4] - 128); n5++;
     }
+    return s5 / n5;
+  })();
+
+  // ---- 6. contact PPG ---------------------------------------------------
+  // Simulate a covered lens: dark red field modulated at 1.15 Hz (69 bpm).
+  var ps = V.makePulseState();
+  var PW = 64, PH = 48, PN = PW * PH;
+  var pf = new Uint8ClampedArray(PN * 4);
+  for (var fr = 0; fr < 300; fr++) {
+    var tMs = fr * (1000 / 30);
+    var beat = Math.sin(2 * Math.PI * 1.15 * (tMs / 1000));
+    for (var p2 = 0, pj = 0; p2 < PN; p2++, pj += 4) {
+      pf[pj] = 150 + (rnd() - 0.5) * 3;                  // red: high (torch through finger)
+      pf[pj + 1] = 42 + beat * 2.2 + (rnd() - 0.5) * 2;  // green: the PPG signal
+      pf[pj + 2] = 30 + (rnd() - 0.5) * 2;
+      pf[pj + 3] = 255;
+    }
+    V.pulseSample(ps, pf, PN, tMs);
   }
-  var pulseRatio = (eA / (half * PH)) / Math.max(eB / ((PW - half) * PH), 1e-9);
-  var est = V.pulseBpm(ps);
-  var pulseOk = pulseRatio >= 3 && est.conf >= 0.3 && est.bpm >= 60 && est.bpm <= 84;
+  var ppg = V.pulseBpm(ps);
+  var ppgOk = ps.covered && ppg.conf >= 0.45 && ppg.bpm >= 62 && ppg.bpm <= 76;
 
-  grayToCanvas('c-eq', bufs.eq, 1);
-  grayToCanvas('c-vess', bufs.vess, 180 / state.norm);
-
-  // metrics: normalized vesselness on-vein vs clearly-off-vein
-  var onSum = 0, onN = 0, offSum = 0, offN = 0, eqOn = 0, eqOff = 0;
-  var inv = 1 / state.norm;
-  for (var i = 0; i < W * H; i++) {
-    var x = i % W, y = (i / W) | 0;
-    if (x < 8 || y < 8 || x >= W - 8 || y >= H - 8) continue;
-    var v = bufs.vess[i] * inv;
-    if (truth[i]) { onSum += v; onN++; eqOn += bufs.eq[i]; }
-    else if (!exclude[i]) { offSum += v; offN++; eqOff += bufs.eq[i]; }
+  // uncovered lens must be rejected, not guessed at
+  var ps2 = V.makePulseState();
+  var bright = new Uint8ClampedArray(PN * 4);
+  for (var b2 = 0; b2 < PN * 4; b2 += 4) {
+    bright[b2] = 200; bright[b2 + 1] = 190; bright[b2 + 2] = 180; bright[b2 + 3] = 255;
   }
-  var onMean = onSum / onN, offMean = offSum / offN, ratio = onMean / Math.max(offMean, 1e-9);
-  var eqDrop = (eqOff / offN) - (eqOn / onN);
+  var cov2 = V.pulseSample(ps2, bright, PN, 0).covered;
 
-  // label precision: centroid must fall near a true vein (dilated mask)
-  var hits = 0;
-  comps.forEach(function (c) {
-    var idx = Math.round(c.y) * W + Math.round(c.x);
-    if (exclude[idx]) hits++;
-  });
-  var precision = comps.length ? hits / comps.length : 0;
+  // ---- panels -----------------------------------------------------------
+  (function () {
+    var c = document.getElementById('c-hemo');
+    c.width = W; c.height = H;
+    var im = c.getContext('2d').createImageData(W, H);
+    var lo = 1e9, hi = -1e9;
+    for (var i = 0; i < N; i++) { if (hemo[i] < lo) lo = hemo[i]; if (hemo[i] > hi) hi = hemo[i]; }
+    for (var i2 = 0, j2 = 0; i2 < N; i2++, j2 += 4) {
+      var v = (hemo[i2] - lo) / (hi - lo) * 255;
+      im.data[j2] = v; im.data[j2 + 1] = v; im.data[j2 + 2] = v; im.data[j2 + 3] = 255;
+    }
+    c.getContext('2d').putImageData(im, 0, 0);
+  })();
+  (function () {
+    var st = V.makeState();
+    var o = new ImageData(W, H);
+    V.analyzeReveal(input, o.data, bufs, st, { strength: 0.6, still: true });
+    var c = document.getElementById('c-out');
+    c.width = W; c.height = H;
+    var g = c.getContext('2d');
+    g.putImageData(new ImageData(new Uint8ClampedArray(input), W, H), 0, 0);
+    var lay = document.createElement('canvas');
+    lay.width = W; lay.height = H;
+    lay.getContext('2d').putImageData(o, 0, 0);
+    g.globalCompositeOperation = 'hard-light';
+    g.drawImage(lay, 0, 0);
+    g.globalCompositeOperation = 'source-over';
+  })();
 
-  var revealOk = revealRatio >= 1.8 && revOn >= 8 && stackDrop <= 0.75 &&
-    alignedOn >= 8 && alignDrop <= 0.85;
-  var pass = ratio >= 2.5 && onMean >= 0.10 && eqDrop >= 8 && skinFrac >= 0.5 &&
-    comps.length >= 2 && comps.length <= 9 && precision >= 0.6 && pulseOk && revealOk &&
-    hairReject >= 4 && compsOnHair === 0;
+  // ---- verdict ----------------------------------------------------------
+  var pass =
+    veinLift > 0.004 && separation >= 8 && shadingVsVein >= 4 &&
+    toneRetention >= 0.6 &&
+    renderVeinVsHair >= 5 && devVein >= 8 &&
+    stackDrop <= 0.88 && shakenVein >= 6 &&
+    ppgOk && cov2 === false;
+
   var lines = [
-    'skin mask coverage      : ' + (skinFrac * 100).toFixed(0) + '%      (need ≥ 50%)',
-    'HAIR: vein/hair opacity : ' + hairReject.toFixed(1) + 'x      (need ≥ 4x)',
-    'HAIR: tags on hair      : ' + compsOnHair + '         (need 0)',
-    'reveal on-vein amp      : ' + revOn.toFixed(1) + '       (need ≥ 8)',
-    'reveal on/off ratio     : ' + revealRatio.toFixed(2) + '     (need ≥ 1.8)',
-    'stacking noise drop     : ' + (stackDrop * 100).toFixed(0) + '% of single frame (need ≤ 75%)',
-    'shaken-stack vein amp   : ' + alignedOn.toFixed(1) + '       (±5px shake, need ≥ 8)',
-    'shaken-stack noise      : ' + (alignDrop * 100).toFixed(0) + '% of single frame (need ≤ 85%)',
-    'vesselness on-vein mean : ' + onMean.toFixed(4) + '   (need ≥ 0.10)',
-    'vesselness off-vein mean: ' + offMean.toFixed(4),
-    'on/off ratio            : ' + ratio.toFixed(2) + '     (need ≥ 2.5)',
-    'CLAHE vein darkening    : ' + eqDrop.toFixed(1) + ' gray levels (need ≥ 8)',
-    'labeled components      : ' + comps.length + '        (need 2–9)',
-    'label precision         : ' + (precision * 100).toFixed(0) + '%      (need ≥ 60%)',
-    'pulse localization      : ' + pulseRatio.toFixed(1) + 'x       (need ≥ 3x)',
-    'pulse rate estimate     : ' + est.bpm.toFixed(0) + ' bpm, conf ' + est.conf.toFixed(2) + ' (true 72, need 60–84 @ conf ≥ 0.3)',
-    'pipeline time           : ' + ms.toFixed(1) + ' ms @ ' + W + 'x' + H,
+    'HEMOGLOBIN SEPARATION (Tsumura)',
+    '  vein lift over skin     : ' + veinLift.toFixed(5) + '   (need > 0.004)',
+    '  hair lift over skin     : ' + hairLift.toFixed(5) + '   (neutral → ~0)',
+    '  vein/hair separation    : ' + separation.toFixed(1) + 'x     (need ≥ 8x)',
+    '  vein lift / shading drift: ' + shadingVsVein.toFixed(1) + 'x     (need ≥ 4x)',
+    '  dark-skin lift retained : ' + (toneRetention * 100).toFixed(0) + '%      (need ≥ 60%)',
+    '',
+    'VEINS VIEW (end to end)',
+    '  amplitude on vein       : ' + devVein.toFixed(1) + '      (need ≥ 8)',
+    '  amplitude on hair       : ' + devHair.toFixed(1),
+    '  amplitude on plain skin : ' + devSkin.toFixed(1),
+    '  vein/hair in output     : ' + renderVeinVsHair.toFixed(1) + 'x     (need ≥ 5x)',
+    '',
+    'TEMPORAL STACKING',
+    // floor is not 0: plain "skin" carries real mottling and an
+    // illumination gradient, which stacking correctly preserves
+    '  noise after 25 frames   : ' + (stackDrop * 100).toFixed(0) + '% of single frame (need ≤ 88%)',
+    '  vein amp, ±5px shake    : ' + shakenVein.toFixed(1) + '      (need ≥ 6)',
+    '',
+    'CONTACT PPG',
+    '  rate (true 69)          : ' + ppg.bpm.toFixed(1) + ' bpm, conf ' + ppg.conf.toFixed(2) + '  (need 62-76 @ ≥0.45)',
+    '  uncovered lens rejected : ' + (cov2 === false ? 'yes' : 'NO'),
+    '',
+    '  frame time              : ' + ms.toFixed(1) + ' ms @ ' + W + 'x' + H,
     '',
     pass ? 'RESULT: PASS' : 'RESULT: FAIL'
   ];
   var el = document.getElementById('summary');
   el.textContent = lines.join('\n');
   el.className = pass ? 'pass' : 'fail';
-  window.__venuleTest = { onMean: onMean, offMean: offMean, ratio: ratio, eqDrop: eqDrop, labels: comps.length, precision: precision, hairReject: hairReject, compsOnHair: compsOnHair, pulseRatio: pulseRatio, bpm: est.bpm, bpmConf: est.conf, ms: ms, pass: pass };
+  window.__venuleTest = {
+    veinLift: veinLift, hairLift: hairLift, separation: separation,
+    shadingVsVein: shadingVsVein, toneRetention: toneRetention,
+    devVein: devVein, devHair: devHair, renderVeinVsHair: renderVeinVsHair,
+    stackDrop: stackDrop, shakenVein: shakenVein,
+    bpm: ppg.bpm, bpmConf: ppg.conf, ppgOk: ppgOk, uncoveredRejected: cov2 === false,
+    ms: ms, pass: pass
+  };
 })();
 </script>
 </body>
