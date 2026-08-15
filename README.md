@@ -26,39 +26,41 @@ custom domain can be added in the repo's Pages settings.
 
 ## How it works
 
-Pipeline per frame, in [js/vision.js](js/vision.js):
+Two pipelines share the buffers, in [js/vision.js](js/vision.js):
 
-1. **Green channel** — hemoglobin absorbs most strongly at 540–580 nm, so
-   near-surface veins are a few percent darker in green.
-2. **3×3 box denoise** — CLAHE amplifies sensor noise; a light blur first buys
-   a lot of clarity for almost no detail.
-3. **CLAHE** — 8×N tiles, clip factor 1.2–5.5 (the *Contrast* slider), bilinear
-   blending between tile LUTs.
-4. **Frangi vesselness** (Veins/Split modes) — Hessian eigenvalues at σ ≈
-   {1.5, 3, 5} (scaled to processing width), β = 0.5, structureness scale `c`
-   set adaptively per scale from a subsampled Hessian-norm pre-scan. Dark-ridge
-   case only (λ₂ > 0).
-5. **Composite** — smoothstep-thresholded overlay (the *Sensitivity* slider) in
-   the accent color over a desaturated base; display normalization uses a
-   decaying running max so it doesn't flicker.
+**Reveal** (default) — no detection at all. Motion-compensated temporal
+stacking (see below) then local-contrast amplification of the stacked RGB,
+composited over crisp native-res video as a hard-light detail layer.
 
-Modes: **Reveal** (default; computational photography: motion-COMPENSATED
+**Trace** — detection on the spectral ratio map (see "How Trace avoids
+hair"), skin-gated by a union of a MediaPipe `selfie_multiclass` category
+mask (in a worker) and a YCbCr colour gate, then CLAHE, then multi-scale
+Frangi vesselness (σ ≈ {1.4, 2.6, 4.2} scaled to processing width, β = 0.5,
+dark-ridge case only), 99th-percentile normalization, smoothstep threshold,
+and hysteresis connected components for the numbered tags.
+
+Modes: **Reveal** (default; computational photography: motion-compensated
 temporal frame stacking — coarse-to-fine global translation alignment plus
 exposure normalization, so handheld shake still stacks — then soft-clipped
 unsharp amplification of the stacked RGB at vein scales, composited as a
 hard-light detail layer over crisp native-res video, skin-gated; press and
-hold the stage to peek at the raw feed), **Veins** (teal dark-ridge overlay),
-**Labels** (adds numbered tags via connected-component analysis of the
-thresholded map — hysteresis flood fill, elongated components only, throttled
-to every 12th frame live so tags don't jitter), **Structures** (adds the
-bright-ridge case of the same Frangi filter in amber — raised, tendon-like
-ridges), **Pulse** (remote photoplethysmography: per-pixel temporal band-pass
-via dual EMAs at 120px width, energy map overlaid in coral, heart rate from
-autocorrelation of the spatial-mean signal — live feed only), **Split**
-(original | processed with a draggable divider). Artery *outlines* are
-deliberately absent: arteries sit below visible-light penetration depth, so a
-camera image contains no artery-shape signal to detect — pulsation is the
-part that survives, and Pulse mode shows exactly that.
+hold the stage to peek at the raw feed), **Trace** (detection + numbered
+tags in one view), **Pulse** (rPPG: per-pixel temporal band-pass via dual
+EMAs at 120px width, energy map in coral, heart rate from autocorrelation —
+live feed only), **Split** (raw | processed, draggable divider).
+
+**How Trace avoids hair.** The detector input is the spectral ratio
+B/((R+G)/2), not luminance. Neutral absorbers — hair, shadows, creases, ink,
+dim light — scale R, G and B together, which leaves that ratio unchanged, so
+they cannot produce a ridge. A vein can't be neutral: blue light doesn't
+reach vein depth, so it dims R and G alone and the ratio rises. A gate keeps
+only pixels deviating vein-ward from their local surroundings, then Frangi
+vesselness traces the surviving dark ridges. Measured 588x more overlay on
+veins than on hair strands in `test/test.html`, which includes hair strands
+as explicit false-positive controls. Artery *outlines* are absent by
+design: arteries sit below visible-light penetration depth, so the image
+contains no artery-shape signal — pulsation is the part that survives, and
+Pulse mode shows exactly that.
 
 [js/app.js](js/app.js) handles camera plumbing and adapts processing resolution
 (256–512 px wide) to hold ~30 fps on the current machine. Frozen frames and

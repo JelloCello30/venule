@@ -154,7 +154,7 @@
       // classic worker, NOT {type:'module'}: MediaPipe's WASM loader calls
       // importScripts(), which module workers prohibit; the worker itself
       // pulls the ESM API in via dynamic import(), legal in classic workers
-      seg.worker = new Worker('js/segworker.js?v=6');
+      seg.worker = new Worker('js/segworker.js?v=7');
     } catch (e) {
       seg.status = 'unavailable';
       return;
@@ -210,7 +210,7 @@
 
   var app = {
     phase: 'start',          // start | live | photo | error
-    mode: 'reveal',          // reveal | veins | labels | structures | pulse | split
+    mode: 'reveal',          // reveal | trace | pulse | split
     facing: 'environment',
     stream: null,
     frozen: false,
@@ -419,6 +419,7 @@
       app.multiCam = devices.filter(function (d) { return d.kind === 'videoinput'; }).length > 1;
       app.photoBitmap = null;
       setFrozen(false);
+      tuneCamera();
       setupTorch();
       syncProcSize();
       showHint('back of your hand · bright light · hold still');
@@ -471,9 +472,6 @@
     }
   }
 
-  function pipelineModeFor(mode) {
-    return mode === 'structures' ? 'structures' : 'veins'; // veins, labels
-  }
 
   function renderPulseOverlay() {
     syncPulseSize();
@@ -570,10 +568,10 @@
       }
       ctx.globalCompositeOperation = 'source-over';
     } else {
-      // annotation path: veins / labels / structures
-      var wantLabels = app.mode === 'labels' && (still || app.labelTick++ % 12 === 0);
+      // detection path: Trace (overlay + numbered tags in one view)
+      var wantLabels = still || app.labelTick++ % 12 === 0;
       var res = V.analyze(img.data, app.bufs, app.state, {
-        mode: pipelineModeFor(app.mode),
+        mode: 'trace',
         strength: parseFloat(els.strength.value),
         sensitivity: parseFloat(els.sensitivity.value),
         still: still,
@@ -586,7 +584,7 @@
       app.skinFrac = res.skinFrac;
 
       ctx.drawImage(src, 0, 0, dw, dh);
-      V.renderOverlay(app.bufs, app.outImage.data, app.mode === 'structures');
+      V.renderOverlay(app.bufs, app.outImage.data);
       app.outCtx.putImageData(app.outImage, 0, 0);
       ctx.imageSmoothingEnabled = true;
       ctx.fillStyle = 'rgba(6,8,10,0.16)';
@@ -620,7 +618,7 @@
     }
     ctxL.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctxL.clearRect(0, 0, cw, ch);
-    if (app.mode !== 'labels' || !app.lastLabels) return;
+    if (app.mode !== 'trace' || !app.lastLabels) return;
 
     var sx = cw / app.bufs.w, sy = ch / app.bufs.h;
     ctxL.font = '600 11px ui-monospace, Menlo, monospace';
@@ -732,7 +730,7 @@
       app.photoBitmap = bmp;
       app.stillSegDone = false;
       setFrozen(false);
-      if (app.mode === 'pulse') app.mode = 'veins';
+      if (app.mode === 'pulse') app.mode = 'reveal';
       // stills can afford the top resolution
       app.procIdx = PROC_WIDTHS.length - 1;
       syncProcSize();
@@ -760,7 +758,7 @@
       if (b.dataset.mode === 'pulse') b.disabled = app.phase === 'photo';
     });
     els.sensRow.hidden = app.mode === 'reveal' || app.mode === 'split';
-    els.legend.hidden = app.mode !== 'structures';
+    els.legend.hidden = app.mode !== 'trace';
     els.divider.hidden = app.mode !== 'split';
   }
 
@@ -877,11 +875,9 @@
   document.addEventListener('keydown', function (e) {
     if (e.target.tagName === 'INPUT') return;
     if (e.key === '1') setMode('reveal');
-    if (e.key === '2') setMode('veins');
-    if (e.key === '3') setMode('labels');
-    if (e.key === '4') setMode('structures');
-    if (e.key === '5') setMode('pulse');
-    if (e.key === '6') setMode('split');
+    if (e.key === '2') setMode('trace');
+    if (e.key === '3') setMode('pulse');
+    if (e.key === '4') setMode('split');
     if (e.key === 'f' && app.phase === 'live') els.btnFreeze.click();
     if (e.key === 's') els.btnSave.click();
   });
@@ -909,6 +905,26 @@
     el2.classList.remove('fade');
     clearTimeout(hintTimer);
     hintTimer = setTimeout(function () { el2.classList.add('fade'); }, 4500);
+  }
+
+  // The demo feed's real advantage over a phone camera is a stable image.
+  // Ask for continuous close focus and pin white balance / exposure where
+  // the platform allows it, so auto-adjust doesn't fight the frame stack.
+  // Every constraint here is best-effort: unsupported ones are dropped.
+  function tuneCamera() {
+    if (!app.stream) return;
+    var track = app.stream.getVideoTracks()[0];
+    if (!track || !track.getCapabilities || !track.applyConstraints) return;
+    var caps = {};
+    try { caps = track.getCapabilities() || {}; } catch (e) { return; }
+    var adv = [];
+    if (caps.focusMode && caps.focusMode.indexOf('continuous') >= 0) adv.push({ focusMode: 'continuous' });
+    if (caps.whiteBalanceMode && caps.whiteBalanceMode.indexOf('continuous') >= 0) adv.push({ whiteBalanceMode: 'continuous' });
+    if (caps.exposureMode && caps.exposureMode.indexOf('continuous') >= 0) adv.push({ exposureMode: 'continuous' });
+    // a longer frame duration means a cleaner image; only if offered
+    if (caps.frameRate && caps.frameRate.max >= 30) adv.push({ frameRate: { ideal: 30, max: 30 } });
+    if (!adv.length) return;
+    track.applyConstraints({ advanced: adv }).catch(function () { /* best effort */ });
   }
 
   // torch (flashlight) — Android Chrome exposes it via track capabilities;

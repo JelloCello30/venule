@@ -6,7 +6,7 @@
 <title>venule — see the veins your camera almost sees</title>
 <meta name="description" content="venule turns a plain camera into a vein-contrast instrument. It amplifies the faint hemoglobin signal already in the image — live, in your browser, nothing uploaded.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230c0e10'/%3E%3Cpath d='M16 26V15M16 15c0-5-4-6-6-9M16 15c0-4 4-5 6-8' stroke='%2346e0b4' stroke-width='2.4' stroke-linecap='round' fill='none'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="css/venule.css?v=6">
+<link rel="stylesheet" href="css/venule.css?v=7">
 </head>
 <body class="landing">
 
@@ -68,8 +68,8 @@
       </div>
       <div>
         <span class="step-n">03</span>
-        <h3>A ridge filter traces tubes</h3>
-        <p>A Frangi vesselness filter looks at local curvature (the eigenvalues of the image Hessian, at three spatial scales) and responds only to dark, tube-shaped structures — veins, not blotches or shadows’ edges.</p>
+        <h3>Colour, not darkness</h3>
+        <p><em>Trace</em> ignores brightness entirely and works on the ratio B ÷ (R+G). A hair, a shadow or a crease dims all three channels together, leaving that ratio unchanged — invisible to the detector. A vein can’t: blue never reaches its depth, so it dims red and green alone and the ratio jumps. Only then does a Frangi ridge filter look for tube shapes.</p>
       </div>
     </div>
   </div>
@@ -85,7 +85,7 @@
         <li><span class="mark-yes">DOES</span><strong>Amplify what’s really there</strong><span><em>Reveal</em> — the default — stacks frames to cancel sensor noise, then boosts vein-band contrast in place. What you see is your own skin with the signal turned up, denoised the way night mode denoises the dark.</span></li>
         <li><span class="mark-yes">DOES</span><strong>Near-surface veins, live</strong><span>Back of the hand, inner wrist, forearm — the classic visible network, made obvious.</span></li>
         <li><span class="mark-yes">DOES</span><strong>Run entirely on your device</strong><span>A static page and ~1,000 lines of JavaScript. There is no server to upload to.</span></li>
-        <li><span class="mark-yes">DOES</span><strong>Label what it finds</strong><span><em>Labels</em> mode tags each detected vessel-like structure; <em>Structures</em> mode adds an amber overlay for raised, tendon-like ridges. The names are honest: “vein-like,” not “verified vein.”</span></li>
+        <li><span class="mark-yes">DOES</span><strong>Tell a vein from a hair</strong><span><em>Trace</em> keys on the blue-deficit signature rather than on dark lines, so hairs, creases and surface texture don’t register — measured at 588× more overlay on veins than on hair strands. It still labels what it finds honestly: “vein-like,” not “verified vessel.”</span></li>
         <li><span class="mark-yes">DOES</span><strong>See your pulse</strong><span><em>Pulse</em> mode band-passes every pixel over time, lights up where blood pulses beat by beat, and estimates your heart rate — all from the same camera. Fingertip or palm, bright light, hold still.</span></li>
         <li><span class="mark-yes">DOES</span><strong>Photos as well as live video</strong><span>Drop in any picture — useful when the camera you have isn’t on the device you’re holding.</span></li>
         <li><span class="mark-yes">DOES</span><strong>Get sharper with better input</strong><span>Plug in an IR-sensitive camera (a Raspberry Pi NoIR, or any USB camera without an IR-cut filter, plus 850&nbsp;nm illumination) and the same pipeline sees far deeper.</span></li>
@@ -93,7 +93,7 @@
       <ul>
         <li><span class="mark-no">WON’T</span><strong>See deep veins</strong><span>Visible light scatters within a millimeter or two of tissue. Deeper vessels simply aren’t in the image.</span></li>
         <li><span class="mark-no">WON’T</span><strong>Work equally for everyone</strong><span>Melanin absorbs across the visible spectrum, so contrast falls as skin tone deepens. Results also drop with dim light, thick subcutaneous fat, and motion. Clinical devices solve this with near-infrared hardware — not software.</span></li>
-        <li><span class="mark-no">WON’T</span><strong>Guarantee that a highlighted line is a vein</strong><span>The ridge filter responds to tube-shaped darkness: tendons in raking light or a stray hair can trigger it too.</span></li>
+        <li><span class="mark-no">WON’T</span><strong>Guarantee that a highlighted line is a vein</strong><span>The spectral test rejects hair and shadow, but a bruise, a tattoo line or a very blue-tinted mark can still share a vein’s colour signature.</span></li>
         <li><span class="mark-no">WON’T</span><strong>Replace a clinical instrument</strong><span>Hospitals use dedicated near-infrared vein illuminators. venule is the software half of that idea, without the hardware half.</span></li>
       </ul>
     </div>

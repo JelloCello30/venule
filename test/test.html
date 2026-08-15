@@ -19,9 +19,9 @@
 <div id="summary">running…</div>
 <div class="row">
   <figure><canvas id="c-in"></canvas><figcaption>input (synthetic skin + faint veins)</figcaption></figure>
-  <figure><canvas id="c-eq"></canvas><figcaption>green + CLAHE</figcaption></figure>
+  <figure><canvas id="c-eq"></canvas><figcaption>opponent + CLAHE</figcaption></figure>
   <figure><canvas id="c-vess"></canvas><figcaption>vesselness (normalized)</figcaption></figure>
-  <figure><canvas id="c-out"></canvas><figcaption>veins composite</figcaption></figure>
+  <figure><canvas id="c-out"></canvas><figcaption>trace composite</figcaption></figure>
 </div>
 
 <script src="../js/vision.js"></script>
@@ -34,6 +34,33 @@
   // deterministic LCG so runs are reproducible
   var seed = 12345;
   function rnd() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
+
+  // Neutral absorbers that must NOT be traced: hairs (thin, dark, grey)
+  // and a shadow crease (broad, dark, grey). Same darkness as the veins,
+  // no vein-ward chroma shift.
+  var HAIRS = [
+    { w: 3, a: 0.42, p: [[70, 60], [180, 130], [300, 120], [430, 190]] },
+    { w: 2, a: 0.38, p: [[100, 250], [230, 300], [360, 250]] },
+    { w: 4, a: 0.34, p: [[380, 330], [430, 250], [460, 140]] }
+  ];
+  function strokePath(ctx, p) {
+    ctx.beginPath();
+    ctx.moveTo(p[0][0], p[0][1]);
+    for (var i = 1; i < p.length - 1; i++) {
+      var xc = (p[i][0] + p[i + 1][0]) / 2, yc = (p[i][1] + p[i + 1][1]) / 2;
+      ctx.quadraticCurveTo(p[i][0], p[i][1], xc, yc);
+    }
+    ctx.lineTo(p[p.length - 1][0], p[p.length - 1][1]);
+    ctx.stroke();
+  }
+  function strokeHairs(ctx, style) {
+    ctx.lineCap = 'round';
+    HAIRS.forEach(function (v) {
+      if (style === 'mask') { ctx.strokeStyle = '#fff'; ctx.lineWidth = v.w + 10; }
+      else { ctx.strokeStyle = 'rgba(60,52,46,' + v.a + ')'; ctx.lineWidth = v.w; }
+      strokePath(ctx, v.p);
+    });
+  }
 
   function strokeVeins(ctx, style) {
     // three veins of different widths/faintness at known positions
@@ -53,7 +80,8 @@
       ctx.lineCap = 'round';
       if (style === 'truth') { ctx.strokeStyle = '#fff'; ctx.lineWidth = v.w; }
       else if (style === 'exclude') { ctx.strokeStyle = '#fff'; ctx.lineWidth = v.w + 14; }
-      else { ctx.strokeStyle = 'rgba(118,116,138,' + v.a + ')'; ctx.lineWidth = v.w; }
+      // veins keep red, lose blue — the signature the detector keys on
+      else { ctx.strokeStyle = 'rgba(150,120,160,' + v.a + ')'; ctx.lineWidth = v.w; }
       ctx.stroke();
     });
   }
@@ -74,6 +102,7 @@
       ctx.fillRect(0, 0, W, H);
     }
     strokeVeins(ctx, 'veins');
+    strokeHairs(ctx, 'hairs');
     var img = ctx.getImageData(0, 0, W, H);
     var pristine = new Uint8ClampedArray(img.data); // noise-free copy for the stacking test
     for (var j = 0; j < img.data.length; j += 4) {  // per-pixel sensor noise
@@ -113,9 +142,22 @@
   var truth = buildMask('truth');
   var exclude = buildMask('exclude');
 
+  function buildHairMask() {
+    var c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    var ctx = c.getContext('2d');
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+    strokeHairs(ctx, 'mask');
+    var d = ctx.getImageData(0, 0, W, H).data;
+    var m = new Uint8Array(W * H);
+    for (var i = 0; i < W * H; i++) m[i] = d[i * 4] > 128 ? 1 : 0;
+    return m;
+  }
+  var hairMask = buildHairMask();
+
   var bufs = V.makeBuffers(W, H);
   var state = V.makeState();
-  var params = { mode: 'veins', strength: 0.6, sensitivity: 0.55, still: true };
+  var params = { mode: 'trace', strength: 0.6, sensitivity: 0.55, still: true };
 
   var t0 = performance.now();
   var res1 = V.analyze(input.data, bufs, state, params);
@@ -123,10 +165,26 @@
   var ms = (performance.now() - t0) / 2;
   var skinFrac = res1.skinFrac;
 
-  // labels mode: components should land on the drawn veins
+  // labels: components should land on the drawn veins
   params.labels = true;
   var comps = V.analyze(input.data, bufs, state, params).labels || [];
   params.labels = false;
+
+  // HAIR REJECTION: overlay opacity on hair strands vs on veins.
+  // This is the user-reported failure — hairs traced as veins.
+  var hairLit = 0, hairN = 0, veinLit = 0, veinN = 0;
+  for (var hi = 0; hi < W * H; hi++) {
+    var hx = hi % W, hy = (hi / W) | 0;
+    if (hx < 8 || hy < 8 || hx >= W - 8 || hy >= H - 8) continue;
+    if (hairMask[hi]) { hairLit += bufs.alpha[hi]; hairN++; }
+    if (truth[hi]) { veinLit += bufs.alpha[hi]; veinN++; }
+  }
+  var hairMean = hairLit / Math.max(hairN, 1);
+  var veinMean = veinLit / Math.max(veinN, 1);
+  var hairReject = veinMean / Math.max(hairMean, 1e-6);
+  var compsOnHair = comps.filter(function (c) {
+    return hairMask[Math.round(c.y) * W + Math.round(c.x)] === 1;
+  }).length;
 
   // veins composite panel: crisp base + alpha overlay, like the app draws
   var oc = document.getElementById('c-out');
@@ -142,10 +200,6 @@
   ovC.getContext('2d').putImageData(ovImg, 0, 0);
   octx.drawImage(ovC, 0, 0);
 
-  // structures mode: must run without errors and produce a bright-ridge map
-  var stateB = V.makeState();
-  V.analyze(input.data, bufs, stateB, { mode: 'structures', strength: 0.6, sensitivity: 0.55, still: true });
-  var brightOk = bufs.vessB.some(function (v) { return v > 0; });
 
   // reveal: in-place amplification must lift veins well above the floor
   var rev = new ImageData(W, H);
@@ -177,7 +231,7 @@
     for (var q = 0; q < W * H; q++) {
       var qx = q % W, qy = (q / W) | 0;
       if (qx < 8 || qy < 8 || qx >= W - 8 || qy >= H - 8) continue;
-      if (truth[q] || exclude[q]) continue;
+      if (truth[q] || exclude[q] || hairMask[q]) continue; // hairs are real detail, not noise
       var d = revData[q * 4 + 1] - 128;
       s += d < 0 ? -d : d; n2++;
     }
@@ -285,9 +339,12 @@
   var revealOk = revealRatio >= 1.8 && revOn >= 8 && stackDrop <= 0.75 &&
     alignedOn >= 8 && alignDrop <= 0.85;
   var pass = ratio >= 2.5 && onMean >= 0.10 && eqDrop >= 8 && skinFrac >= 0.5 &&
-    comps.length >= 2 && comps.length <= 9 && precision >= 0.6 && brightOk && pulseOk && revealOk;
+    comps.length >= 2 && comps.length <= 9 && precision >= 0.6 && pulseOk && revealOk &&
+    hairReject >= 4 && compsOnHair === 0;
   var lines = [
     'skin mask coverage      : ' + (skinFrac * 100).toFixed(0) + '%      (need ≥ 50%)',
+    'HAIR: vein/hair opacity : ' + hairReject.toFixed(1) + 'x      (need ≥ 4x)',
+    'HAIR: tags on hair      : ' + compsOnHair + '         (need 0)',
     'reveal on-vein amp      : ' + revOn.toFixed(1) + '       (need ≥ 8)',
     'reveal on/off ratio     : ' + revealRatio.toFixed(2) + '     (need ≥ 1.8)',
     'stacking noise drop     : ' + (stackDrop * 100).toFixed(0) + '% of single frame (need ≤ 75%)',
@@ -299,7 +356,6 @@
     'CLAHE vein darkening    : ' + eqDrop.toFixed(1) + ' gray levels (need ≥ 8)',
     'labeled components      : ' + comps.length + '        (need 2–9)',
     'label precision         : ' + (precision * 100).toFixed(0) + '%      (need ≥ 60%)',
-    'bright-ridge map        : ' + (brightOk ? 'produced' : 'EMPTY'),
     'pulse localization      : ' + pulseRatio.toFixed(1) + 'x       (need ≥ 3x)',
     'pulse rate estimate     : ' + est.bpm.toFixed(0) + ' bpm, conf ' + est.conf.toFixed(2) + ' (true 72, need 60–84 @ conf ≥ 0.3)',
     'pipeline time           : ' + ms.toFixed(1) + ' ms @ ' + W + 'x' + H,
@@ -309,7 +365,7 @@
   var el = document.getElementById('summary');
   el.textContent = lines.join('\n');
   el.className = pass ? 'pass' : 'fail';
-  window.__venuleTest = { onMean: onMean, offMean: offMean, ratio: ratio, eqDrop: eqDrop, labels: comps.length, precision: precision, brightOk: brightOk, pulseRatio: pulseRatio, bpm: est.bpm, bpmConf: est.conf, ms: ms, pass: pass };
+  window.__venuleTest = { onMean: onMean, offMean: offMean, ratio: ratio, eqDrop: eqDrop, labels: comps.length, precision: precision, hairReject: hairReject, compsOnHair: compsOnHair, pulseRatio: pulseRatio, bpm: est.bpm, bpmConf: est.conf, ms: ms, pass: pass };
 })();
 </script>
 </body>

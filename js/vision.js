@@ -3,11 +3,19 @@
  * Plain ES2017, zero dependencies. Everything runs on typed arrays at a
  * reduced processing resolution so it holds real-time rates in plain JS.
  *
- * Pipeline: green channel → light denoise → CLAHE → (veins/structures modes)
- * multi-scale Frangi vesselness → composite. Green is used because hemoglobin
- * absorbs most strongly around 540–580 nm, so near-surface veins are a few
- * percent darker there than surrounding skin. Dark tubular structures read as
- * vein-like; bright tubular structures read as raised, tendon-like ridges.
+ * Two pipelines share the buffers:
+ *
+ * Reveal (default): motion-compensated temporal frame stacking, then local
+ * contrast amplification of the stacked RGB — computational photography, no
+ * detection. Shows the skin itself with its own vein contrast turned up.
+ *
+ * Trace: detection. The input is the SPECTRAL RATIO map B/((R+G)/2), not
+ * luminance. Blue light does not reach vein depth, so a vein dims R and G
+ * while leaving B — the ratio rises. Hair, shadows, ink and surface relief
+ * scale all three channels together, which leaves the ratio unchanged, so
+ * they are invisible to the detector by construction. A spectral gate then
+ * keeps only pixels whose ratio deviates vein-ward from their surroundings,
+ * and multi-scale Frangi vesselness traces the dark ridges that survive.
  */
 (function () {
   'use strict';
@@ -24,12 +32,9 @@
       eq: new Uint8ClampedArray(n),   // CLAHE output
       f0: new Float32Array(n),        // scratch (blur result)
       f1: new Float32Array(n),        // scratch (blur temp)
-      vess: new Float32Array(n),      // dark-ridge vesselness (veins)
-      vessS: new Float32Array(n),     // …temporally smoothed
+      vess: new Float32Array(n),      // dark-ridge vesselness (Reveal reuses as detR)
+      vessS: new Float32Array(n),     // …temporally smoothed (Reveal reuses as detG)
       alpha: new Float32Array(n),     // …overlay opacity after threshold
-      vessB: new Float32Array(n),     // bright-ridge response (tendon-like)
-      vessBS: new Float32Array(n),
-      alphaB: new Float32Array(n),
       seen: new Uint8Array(n),        // component labeling scratch
       stack: new Int32Array(n),
       pix: new Int32Array(n),         // pixels of the component being traced
@@ -70,6 +75,42 @@
     }
     var lb = (h - 1) * w, pb = (h - 2) * w;
     for (x = 0; x < w; x++) g8[lb + x] = (f1[pb + x] + f1[lb + x] * 2) / 3;
+  }
+
+  // Spectral map for the Trace detector, denoised. The quantity is the
+  // RATIO r = B / ((R+G)/2), which is invariant to neutral darkening:
+  // scaling R, G and B by the same factor (a hair, a shadow, a dim room)
+  // leaves r unchanged. A vein is not neutral — blue light never reaches
+  // vein depth, so it dims R and G while leaving B, pushing r UP. Mapped
+  // so vein-ward is DARK, which is what the dark-ridge filter looks for.
+  //
+  // Getting this wrong is subtle and was the hair bug: a difference like
+  // B - (R+G)/2 scales with brightness, so darkening warm skin moves it
+  // the same direction a vein does. A ratio does not.
+  var SPEC_MID = 0.80;   // typical skin r
+  var SPEC_GAIN = 620;   // r units → 8-bit code values
+
+  function extractSpectralDenoised(rgba, bufs) {
+    var w = bufs.w, h = bufs.h, f0 = bufs.f0, f1 = bufs.f1, g8 = bufs.g8;
+    var i, j, x, y, n = w * h;
+    for (i = 0, j = 0; i < n; i++, j += 4) {
+      var rg = 0.5 * (rgba[j] + rgba[j + 1]);
+      var v = 128 - (rgba[j + 2] / (rg + 4) - SPEC_MID) * SPEC_GAIN;
+      f0[i] = v < 0 ? 0 : v > 255 ? 255 : v;
+    }
+    for (y = 0; y < h; y++) {
+      var r = y * w;
+      f1[r] = (f0[r] * 2 + f0[r + 1]) / 3;
+      for (x = 1; x < w - 1; x++) f1[r + x] = (f0[r + x - 1] + f0[r + x] + f0[r + x + 1]) / 3;
+      f1[r + w - 1] = (f0[r + w - 2] + f0[r + w - 1] * 2) / 3;
+    }
+    for (x = 0; x < w; x++) g8[x] = (f1[x] * 2 + f1[x + w]) / 3;
+    for (y = 1; y < h - 1; y++) {
+      var a = (y - 1) * w, b = y * w, c = (y + 1) * w;
+      for (x = 0; x < w; x++) g8[b + x] = (f1[a + x] + f1[b + x] + f1[c + x]) / 3;
+    }
+    var lb2 = (h - 1) * w, pb2 = (h - 2) * w;
+    for (x = 0; x < w; x++) g8[lb2 + x] = (f1[pb2 + x] + f1[lb2 + x] * 2) / 3;
   }
 
   /* ---------------- skin mask ---------------- */
@@ -190,13 +231,18 @@
   // meets the sheet), but they are far darker than lit skin while veins
   // are only a few percent darker. Gate the mask by brightness relative
   // to the skin region's median green level.
-  function luminanceGate(bufs, loF, hiF) {
-    var n = bufs.w * bufs.h, g8 = bufs.g8, mask = bufs.mask;
+  // reads luminance straight from RGB: g8 now carries the opponent map
+  function luminanceGateFromRGB(rgba, bufs, loF, hiF) {
+    var n = bufs.w * bufs.h, mask = bufs.mask;
     var hist = bufs.normHist;
     hist.fill(0);
-    var count = 0, i;
-    for (i = 0; i < n; i++) {
-      if (mask[i] > 0.5) { hist[g8[i]]++; count++; }
+    var count = 0, i, j;
+    for (i = 0, j = 0; i < n; i++, j += 4) {
+      if (mask[i] > 0.5) {
+        var L = (0.299 * rgba[j] + 0.587 * rgba[j + 1] + 0.114 * rgba[j + 2]) | 0;
+        hist[L > 255 ? 255 : L]++;
+        count++;
+      }
     }
     if (count < 100) return;
     var half = count / 2, acc = 0, med = 128;
@@ -205,9 +251,9 @@
     // silhouette sits well below — gate between them
     var lo = med * loF, hi = med * hiF;
     var invSpan = 1 / Math.max(hi - lo, 1);
-    for (i = 0; i < n; i++) {
+    for (i = 0, j = 0; i < n; i++, j += 4) {
       if (mask[i] <= 0) continue;
-      var g = g8[i];
+      var g = 0.299 * rgba[j] + 0.587 * rgba[j + 1] + 0.114 * rgba[j + 2];
       if (g <= lo) mask[i] = 0;
       else if (g < hi) mask[i] *= (g - lo) * invSpan;
     }
@@ -376,12 +422,11 @@
   // vein-like; bright ridges (λ2 < 0) are raised, tendon-like structures.
   var INV_TWO_BETA2 = 2.0; // 1 / (2 * 0.5^2)
 
-  function vesselness(bufs, sigmas, wantBright) {
-    var w = bufs.w, h = bufs.h, out = bufs.vess, outB = bufs.vessB;
+  function vesselness(bufs, sigmas) {
+    var w = bufs.w, h = bufs.h, out = bufs.vess;
     var blurred = bufs.f0, tmp = bufs.f1;
     out.fill(0);
-    if (wantBright) outB.fill(0);
-    var maxD = 0, maxB = 0;
+    var maxD = 0;
     var prevSigma = 0;
 
     for (var s = 0; s < sigmas.length; s++) {
@@ -428,15 +473,16 @@
           var rb = lamA / lamB;
           var ss = lamA * lamA + lamB * lamB;
           var vv = Math.exp(-rb * rb * INV_TWO_BETA2) * (1 - Math.exp(-ss * invTwoC2));
-          if (lamB > 0) {
-            if (vv > out[i]) { out[i] = vv; if (vv > maxD) maxD = vv; }
-          } else if (wantBright) {
-            if (vv > outB[i]) { outB[i] = vv; if (vv > maxB) maxB = vv; }
+          // dark ridges only: on the opponent map, that is the vein
+          // signature. Bright ridges are surface relief (tendons, folds).
+          if (lamB > 0 && vv > out[i]) {
+            out[i] = vv;
+            if (vv > maxD) maxD = vv;
           }
         }
       }
     }
-    return { maxD: maxD, maxB: maxB };
+    return maxD;
   }
 
   // 99th percentile of the response inside the skin mask. Normalizing by
@@ -706,10 +752,10 @@
   V.analyzeReveal = function (rgba, outRGBA, bufs, state, params) {
     var w = bufs.w, h = bufs.h, n = w * h;
 
-    extractGreenDenoised(rgba, bufs); // g8 feeds the luminance gate
+    extractGreenDenoised(rgba, bufs); // g8 = green, used by the stack aligner
     updateStack(rgba, bufs, state, params.still);
     var skinFrac = buildSkinMask(rgba, bufs, params.catMask, params.catW || 0, params.catH || 0);
-    luminanceGate(bufs, 0.40, 0.65);
+    luminanceGateFromRGB(rgba, bufs, 0.40, 0.65);
 
     var cov = (skinFrac - 0.03) / 0.05;
     if (cov < 0) cov = 0; else if (cov > 1) cov = 1;
@@ -739,72 +785,72 @@
   /* ---------------- rendering ---------------- */
 
   var ACC_R = 70, ACC_G = 235, ACC_B = 200;    // vein-like: teal
-  var RID_R = 255, RID_G = 176, RID_B = 66;    // tendon-like ridge: amber
-
-  // Grayscale CLAHE view (Enhance mode replaces the video entirely).
-  V.renderEnhance = function (bufs, outRGBA) {
-    var eq = bufs.eq, n = bufs.w * bufs.h;
-    for (var i = 0, j = 0; i < n; i++, j += 4) {
-      var v = eq[i];
-      outRGBA[j] = v; outRGBA[j + 1] = v; outRGBA[j + 2] = v; outRGBA[j + 3] = 255;
-    }
-  };
 
   // Alpha-carrying overlay: the app drawImages this over crisp full-res
   // video, so detection quality and display quality are decoupled.
-  V.renderOverlay = function (bufs, outRGBA, withBright) {
-    var alpha = bufs.alpha, alphaB = bufs.alphaB, n = bufs.w * bufs.h;
+  V.renderOverlay = function (bufs, outRGBA) {
+    var alpha = bufs.alpha, n = bufs.w * bufs.h;
     for (var i = 0, j = 0; i < n; i++, j += 4) {
-      var a = alpha[i];
-      if (withBright && alphaB[i] > a) {
-        outRGBA[j] = RID_R; outRGBA[j + 1] = RID_G; outRGBA[j + 2] = RID_B;
-        outRGBA[j + 3] = (alphaB[i] * 255) | 0;
-      } else {
-        outRGBA[j] = ACC_R; outRGBA[j + 1] = ACC_G; outRGBA[j + 2] = ACC_B;
-        outRGBA[j + 3] = (a * 255) | 0;
-      }
+      outRGBA[j] = ACC_R; outRGBA[j + 1] = ACC_G; outRGBA[j + 2] = ACC_B;
+      outRGBA[j + 3] = (alpha[i] * 255) | 0;
     }
   };
 
   /* ---------------- main entry ---------------- */
 
-  // params: { mode: 'enhance' | 'veins' | 'structures', strength: 0..1,
-  //           sensitivity: 0..1, still: bool, labels: bool }
-  // Fills bufs.eq (always) and bufs.alpha/alphaB (overlay modes); returns
-  // { labels: [...]|null, skinFrac: 0..1 }.
+  // Suppress neutral absorbers (hair, dirt, ink, shadow edges). A vein
+  // reddens the skin it dims — R stays high while B falls behind — whereas
+  // a hair scales all three channels down together. Pixels whose local
+  // chroma doesn't shift vein-ward get their mask zeroed, so the ridge
+  // filter can't fire on them.
+  function spectralGate(bufs) {
+    var w = bufs.w, h = bufs.h, n = w * h;
+    var mask = bufs.mask, spec = bufs.g8, mean = bufs.mean;
+    // Local deviation, not absolute value: skin tone and white balance move
+    // the baseline, but a vein is always darker than the skin BESIDE it in
+    // this map. A neutral absorber sits at its local mean here and is cut.
+    var r = Math.max(3, Math.round(9 * w / 384));
+    boxBlurRunning(spec, mean, bufs.f1, w, h, r);
+    var lo = 1.2, hi = 3.5; // code values below local mean
+    var invSpan = 1 / (hi - lo);
+    for (var i = 0; i < n; i++) {
+      if (mask[i] <= 0) continue;
+      var dev = mean[i] - spec[i];   // >0 = vein-ward
+      if (dev <= lo) { mask[i] = 0; continue; }
+      if (dev < hi) mask[i] *= (dev - lo) * invSpan;
+    }
+  }
+
+  // params: { mode: 'trace', strength: 0..1, sensitivity: 0..1,
+  //           still: bool, labels: bool, catMask/catW/catH }
+  // Fills bufs.eq and bufs.alpha; returns { labels: [...]|null, skinFrac }.
   V.analyze = function (rgba, bufs, state, params) {
     var w = bufs.w, h = bufs.h, n = w * h;
 
-    extractGreenDenoised(rgba, bufs);
-    clahe(bufs, 1.2 + params.strength * 4.3);
-
-    if (params.mode === 'enhance') {
-      return { labels: null, skinFrac: 1 };
-    }
+    // detector input is the blue/red-green RATIO map, NOT luminance:
+    // hair and surface shading cancel there, veins do not
+    extractSpectralDenoised(rgba, bufs);
 
     // mask must be built before vesselness (scratch-buffer reuse)
     var skinFrac = buildSkinMask(rgba, bufs, params.catMask, params.catW || 0, params.catH || 0);
-    luminanceGate(bufs, 0.40, 0.65);
+    luminanceGateFromRGB(rgba, bufs, 0.40, 0.65);
+    spectralGate(bufs);
+
+    clahe(bufs, 1.2 + params.strength * 4.3);
     flattenNonSkin(bufs);
-    var wantBright = params.mode === 'structures';
+
     // physical vein widths are resolution-independent: scale sigmas with w
     var k = w / 384;
-    var res = vesselness(bufs, [1.4 * k, 2.6 * k, 4.2 * k], wantBright);
+    var maxD = vesselness(bufs, [1.4 * k, 2.6 * k, 4.2 * k]);
     var keep = params.still ? 0 : 0.35;
     // almost no skin in frame → fade the whole overlay out instead of
     // decorating the furniture
     var cov = (skinFrac - 0.03) / 0.05;
     if (cov < 0) cov = 0; else if (cov > 1) cov = 1;
 
-    var p = percentileNorm(bufs.vess, bufs.mask, n, res.maxD, bufs.normHist);
+    var p = percentileNorm(bufs.vess, bufs.mask, n, maxD, bufs.normHist);
     state.norm = (params.still || !state.norm) ? p : state.norm * 0.75 + p * 0.25;
     thresholdPass(bufs.vess, bufs.vessS, bufs.alpha, bufs.mask, n, state.norm, params.sensitivity, keep, cov);
-
-    if (wantBright) {
-      var pB = percentileNorm(bufs.vessB, bufs.mask, n, res.maxB, bufs.normHist);
-      state.normB = (params.still || !state.normB) ? pB : state.normB * 0.75 + pB * 0.25;
-      thresholdPass(bufs.vessB, bufs.vessBS, bufs.alphaB, bufs.mask, n, state.normB, params.sensitivity, keep, cov);
-    }
 
     return { labels: params.labels ? findComponents(bufs) : null, skinFrac: skinFrac };
   };
